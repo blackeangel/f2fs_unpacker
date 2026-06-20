@@ -1,0 +1,157 @@
+name: Build
+
+# Linux + Windows (MinGW cross-compile, no MSYS2) + 4 Android NDK ABIs.
+# Every compression dependency (LZ4/Zstd/LZO) is vendored via FetchContent
+# inside CMakeLists.txt — no apt/pacman packages needed in any job below.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  # Pin a known-good CMake to avoid surprises if a runner image bumps to a
+  # new major version mid-stream. CMakeLists.txt also guards against the
+  # CMake 4.x "cmake_minimum_required too old" hard-error via
+  # CMAKE_POLICY_VERSION_MINIMUM, but pinning here keeps CI reproducible.
+  CMAKE_VERSION: "3.28.3"
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Linux x86_64 — native build, Debug + Release
+  # ──────────────────────────────────────────────────────────────────────────
+  linux:
+    name: Linux x86_64 (${{ matrix.build_type }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Run compression round-trip test
+        run: ./build/f2fs_compress_test
+
+      - name: Verify no dynamic dependency on vendored libs
+        run: |
+          ldd build/f2fs_extract
+          ! ldd build/f2fs_extract | grep -qE 'liblz4|libzstd|liblzo2'
+
+      - name: Strip binary (Release only)
+        if: matrix.build_type == 'Release'
+        run: strip build/f2fs_extract
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: f2fs_extract-linux-x86_64-${{ matrix.build_type }}
+          path: build/f2fs_extract
+          if-no-files-found: error
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Windows x86_64 — cross-compiled from Linux via mingw-w64 apt package.
+  # Deliberately NOT using MSYS2: a real (not hypothetical) past project
+  # in this codebase's lineage hit MSYS2 DLL-search-path interference
+  # corrupting static-link results, which cross-compiling from a plain
+  # Ubuntu runner sidesteps entirely.
+  # ──────────────────────────────────────────────────────────────────────────
+  windows-mingw:
+    name: Windows x86_64 MinGW (${{ matrix.build_type }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW-w64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake mingw-w64
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_SYSTEM_NAME=Windows
+          -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc
+          -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++
+          -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Verify PE32+ output
+        run: file build/f2fs_extract.exe | grep -q "PE32+"
+
+      - name: Strip binary (Release only)
+        if: matrix.build_type == 'Release'
+        run: x86_64-w64-mingw32-strip build/f2fs_extract.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: f2fs_extract-windows-x86_64-${{ matrix.build_type }}
+          path: build/f2fs_extract.exe
+          if-no-files-found: error
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Android NDK — 4 ABIs, Release only (matches md1img_repacker/tar_repacker
+  # convention: device builds ship Release, Debug is a desktop-only concern).
+  # ──────────────────────────────────────────────────────────────────────────
+  android:
+    name: Android ${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86_64, x86]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CMake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: false
+
+      - name: Configure
+        run: >
+          cmake -S . -B build-${{ matrix.abi }}
+          -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake
+          -DANDROID_ABI=${{ matrix.abi }}
+          -DANDROID_PLATFORM=android-26
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-${{ matrix.abi }} -j"$(nproc)"
+
+      - name: Verify ELF output
+        run: file build-${{ matrix.abi }}/f2fs_extract | grep -q "ELF"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: f2fs_extract-android-${{ matrix.abi }}
+          path: build-${{ matrix.abi }}/f2fs_extract
+          if-no-files-found: error

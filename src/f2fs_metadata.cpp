@@ -31,6 +31,7 @@
 #include <cstring>
 #include <filesystem>
 #include <sys/stat.h>
+#include "win_pread.h"  // POSIX stat-macro shims (S_ISLNK etc.) on Windows; passthrough on POSIX
 
 namespace fs = std::filesystem;
 
@@ -191,7 +192,7 @@ bool MetadataWriter::writeJSON(const std::string& path) const
     }
 
     fputs("{\n  \"format\": \"f2fs_extract_metadata\",\n  \"version\": 1,\n", f);
-    fprintf(f, "  \"entry_count\": %zu,\n", entries_.size());
+    fprintf(f, "  \"entry_count\": %llu,\n", (unsigned long long)entries_.size());
     fputs("  \"entries\": [\n", f);
 
     for (size_t idx = 0; idx < entries_.size(); ++idx) {

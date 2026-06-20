@@ -43,7 +43,7 @@
 #if defined(_WIN32) || defined(__MINGW32__)
 #  include <sys/utime.h>
 #endif
-#include "win_pread.h"  // POSIX pread() on POSIX; shim on Windows
+#include "win_pread.h"  // POSIX pread() + stat-macro shims on Windows; passthrough on POSIX
 #include "f2fs_compress.h"
 #include "f2fs_metadata.h"
 
@@ -104,9 +104,9 @@ bool F2FSExtractor::readAt(off_t offset, void* buf, size_t size) const
     ssize_t r = ::pread(fd_, buf, size, offset);
     if (r == (ssize_t)size) return true;
     if (r < 0)
-        logf(LogLevel::ERR, "pread(%zu @ %lld): %s", size, (long long)offset, strerror(errno));
+        logf(LogLevel::ERR, "pread(%llu @ %lld): %s", (unsigned long long)size, (long long)offset, strerror(errno));
     else
-        logf(LogLevel::ERR, "pread(%zu @ %lld): short read %zd", size, (long long)offset, r);
+        logf(LogLevel::ERR, "pread(%llu @ %lld): short read %lld", (unsigned long long)size, (long long)offset, (long long)r);
     return false;
 }
 
@@ -272,7 +272,7 @@ bool F2FSExtractor::loadNAT(const std::vector<u8>& nat_ver_bitmap)
         }
     }
 
-    logf(LogLevel::INFO, "NAT loaded: %zu valid entries", nat_.size());
+    logf(LogLevel::INFO, "NAT loaded: %llu valid entries", (unsigned long long)nat_.size());
     return !nat_.empty();
 }
 
@@ -678,8 +678,8 @@ bool F2FSExtractor::extractCompressedFile(const f2fs_inode& inode,
 
             if (cdata.size() < clen) {
                 logf(LogLevel::ERR,
-                     "bidx=%llu: only gathered %zu/%u compressed bytes",
-                     (unsigned long long)bidx, cdata.size(), clen);
+                     "bidx=%llu: only gathered %llu/%u compressed bytes",
+                     (unsigned long long)bidx, (unsigned long long)cdata.size(), clen);
                 ::fclose(out);
                 return false;
             }
@@ -1050,22 +1050,21 @@ void F2FSExtractor::collectMeta(const std::string& relpath,
 void F2FSExtractor::applyTimestamps(const std::string& outpath,
                                     const f2fs_inode&  inode) const
 {
-    auto sane_ns = [](u32 ns) -> long { return (ns <= 999999999u) ? (long)ns : 0L; };
-
 #if defined(_WIN32) || defined(__MINGW32__)
     // Windows/MinGW: second-resolution via _utime64(). Symlinks are rare on
     // this platform and _wutime64 has no NOFOLLOW equivalent, so we accept
     // following the link target here (matches typical Windows tooling).
-    struct __utimbuf64 {
-        __time64_t actime;
-        __time64_t modtime;
-    } times;
+    // Use the system-provided __utimbuf64 directly — no local redeclaration,
+    // no casting, no risk of a single/double-underscore typo mismatch.
+    struct __utimbuf64 times;
     times.actime  = (__time64_t)(int64_t)inode.i_atime;
     times.modtime = (__time64_t)(int64_t)inode.i_mtime;
-    if (_utime64(outpath.c_str(), reinterpret_cast<struct _utimbuf64*>(&times)) != 0) {
+    if (_utime64(outpath.c_str(), &times) != 0) {
         logf(LogLevel::WARN, "_utime64(%s): %s", outpath.c_str(), strerror(errno));
     }
 #else
+    auto sane_ns = [](u32 ns) -> long { return (ns <= 999999999u) ? (long)ns : 0L; };
+
     struct timespec times[2];
     times[0].tv_sec  = (time_t)(int64_t)inode.i_atime;        // access time
     times[0].tv_nsec = sane_ns(inode.i_atime_nsec);
@@ -1094,6 +1093,6 @@ void F2FSExtractor::printInfo() const
     logf(LogLevel::INFO, "  root_ino     : %u", (u32)sb_.root_ino);
     logf(LogLevel::INFO, "  nat_blkaddr  : 0x%X", (u32)sb_.nat_blkaddr);
     logf(LogLevel::INFO, "  main_blkaddr : 0x%X", (u32)sb_.main_blkaddr);
-    logf(LogLevel::INFO, "  NAT entries  : %zu", nat_.size());
+    logf(LogLevel::INFO, "  NAT entries  : %llu", (unsigned long long)nat_.size());
     logf(LogLevel::INFO, "───────────────────────────────────────────────");
 }

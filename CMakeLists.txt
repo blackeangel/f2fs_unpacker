@@ -68,6 +68,16 @@ if(NOT F2FS_COMPRESS_NONE)
     include(FetchContent)
     set(FETCHCONTENT_QUIET ON)
 
+    # CMake 4.x hard-errors on subprojects whose cmake_minimum_required()
+    # predates 3.5 (zstd's bundled build/cmake/CMakeLists.txt still says
+    # VERSION 2.8.12). This is the documented escape hatch: it tells CMake
+    # to evaluate those old version checks as if run under this version
+    # instead of refusing outright. Harmless on CMake < 3.31, where the
+    # variable is simply ignored.
+    if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+        set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+    endif()
+
     # ── LZ4 ─────────────────────────────────────────────────────────────────
     if(NOT F2FS_USE_SYSTEM_LIBS)
         FetchContent_Declare(lz4_src
@@ -122,6 +132,24 @@ if(NOT F2FS_COMPRESS_NONE)
         set(ZSTD_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
         set(ZSTD_BUILD_SHARED   OFF CACHE BOOL "" FORCE)
         FetchContent_MakeAvailable(zstd_src)
+        # zstd's own build/cmake/lib/CMakeLists.txt does not propagate
+        # zstd.h's directory via target_include_directories for in-tree
+        # (non-installed) consumers — without this, the build would silently
+        # fall through to whatever zstd.h happens to be on the system
+        # default include path (or fail outright if there isn't one),
+        # defeating the entire point of vendoring it. Caught by testing a
+        # MinGW cross-build on a machine that had no system libzstd-dev.
+        # Wrapped in $<BUILD_INTERFACE:...>: zstd's own CMakeLists.txt
+        # installs libzstd_static by default (no toggle to disable it), and
+        # CMake's Generate step validates that INTERFACE_INCLUDE_DIRECTORIES
+        # on any installable target doesn't contain a bare build-tree path —
+        # it must be wrapped to mark it "valid only pre-install". We don't
+        # actually install/export libzstd_static ourselves, but CMake still
+        # validates it transitively because install(TARGETS f2fs_extract)
+        # links against it. Without this, `cmake --build` fails at the
+        # Generate step with "which is prefixed in the build directory".
+        target_include_directories(libzstd_static PUBLIC
+            $<BUILD_INTERFACE:${zstd_src_SOURCE_DIR}/lib>)
         set(ZSTD_FOUND TRUE)
         set(ZSTD_TARGET libzstd_static)
         message(STATUS "f2fs_extract: Zstd vendored via FetchContent (facebook/zstd v1.5.5)")
