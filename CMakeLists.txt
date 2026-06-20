@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(f2fs_extract
-    VERSION 1.1.0
+    VERSION 1.2.0
     LANGUAGES C CXX
     DESCRIPTION "F2FS image extractor with transparent decompression"
 )
@@ -21,14 +21,19 @@ else()
 endif()
 
 # ────────────────────────────────────────────────────────────────────────────
-# Compression library option (auto / system / fetch / none)
+# Dependency strategy
+#
+# DEFAULT (no flags needed): every compression library is fetched as source
+# via FetchContent and statically linked in. No system packages required —
+# `cmake -S . -B build && cmake --build build` works on a bare toolchain
+# with nothing but internet access to github.com.
+#
+# F2FS_USE_SYSTEM_LIBS=ON: opt out of FetchContent and use system-installed
+# liblz4/libzstd/liblzo2 instead (faster local rebuilds, no re-download).
+# F2FS_COMPRESS_NONE=ON:   skip compression support entirely.
 # ────────────────────────────────────────────────────────────────────────────
-option(F2FS_COMPRESS_FETCH  "Force FetchContent for compression libs (Android/MinGW)" OFF)
+option(F2FS_USE_SYSTEM_LIBS "Use system-installed compression libs instead of vendoring via FetchContent" OFF)
 option(F2FS_COMPRESS_NONE   "Build without compression support" OFF)
-
-if(ANDROID OR MINGW)
-    set(F2FS_COMPRESS_FETCH ON CACHE BOOL "" FORCE)
-endif()
 
 # ────────────────────────────────────────────────────────────────────────────
 # Sources
@@ -64,7 +69,7 @@ if(NOT F2FS_COMPRESS_NONE)
     set(FETCHCONTENT_QUIET ON)
 
     # ── LZ4 ─────────────────────────────────────────────────────────────────
-    if(F2FS_COMPRESS_FETCH)
+    if(NOT F2FS_USE_SYSTEM_LIBS)
         FetchContent_Declare(lz4_src
             GIT_REPOSITORY https://github.com/lz4/lz4.git
             GIT_TAG        v1.9.4
@@ -83,6 +88,7 @@ if(NOT F2FS_COMPRESS_NONE)
         endif()
         set(LZ4_FOUND TRUE)
         set(LZ4_TARGET lz4::lz4)
+        message(STATUS "f2fs_extract: LZ4 vendored via FetchContent (lz4/lz4 v1.9.4)")
     else()
         find_path(LZ4_INCLUDE_DIR  NAMES lz4.h)
         find_library(LZ4_LIBRARY   NAMES lz4)
@@ -93,19 +99,19 @@ if(NOT F2FS_COMPRESS_NONE)
                 IMPORTED_LOCATION       "${LZ4_LIBRARY}"
                 INTERFACE_INCLUDE_DIRECTORIES "${LZ4_INCLUDE_DIR}")
             set(LZ4_TARGET lz4::lz4)
+            message(STATUS "f2fs_extract: LZ4 found on system (${LZ4_LIBRARY})")
         endif()
     endif()
 
     if(LZ4_FOUND)
         target_compile_definitions(f2fs_extract PRIVATE F2FS_HAVE_LZ4)
         target_link_libraries(f2fs_extract PRIVATE ${LZ4_TARGET})
-        message(STATUS "f2fs_extract: LZ4 enabled")
     else()
-        message(WARNING "f2fs_extract: LZ4 not found — LZ4-compressed F2FS files will fail")
+        message(WARNING "f2fs_extract: LZ4 not available — LZ4-compressed F2FS files will fail to extract")
     endif()
 
     # ── ZSTD ────────────────────────────────────────────────────────────────
-    if(F2FS_COMPRESS_FETCH)
+    if(NOT F2FS_USE_SYSTEM_LIBS)
         FetchContent_Declare(zstd_src
             GIT_REPOSITORY https://github.com/facebook/zstd.git
             GIT_TAG        v1.5.5
@@ -118,6 +124,7 @@ if(NOT F2FS_COMPRESS_NONE)
         FetchContent_MakeAvailable(zstd_src)
         set(ZSTD_FOUND TRUE)
         set(ZSTD_TARGET libzstd_static)
+        message(STATUS "f2fs_extract: Zstd vendored via FetchContent (facebook/zstd v1.5.5)")
     else()
         find_path(ZSTD_INCLUDE_DIR  NAMES zstd.h)
         find_library(ZSTD_LIBRARY   NAMES zstd)
@@ -128,33 +135,66 @@ if(NOT F2FS_COMPRESS_NONE)
                 IMPORTED_LOCATION       "${ZSTD_LIBRARY}"
                 INTERFACE_INCLUDE_DIRECTORIES "${ZSTD_INCLUDE_DIR}")
             set(ZSTD_TARGET zstd::zstd)
+            message(STATUS "f2fs_extract: Zstd found on system (${ZSTD_LIBRARY})")
         endif()
     endif()
 
     if(ZSTD_FOUND)
         target_compile_definitions(f2fs_extract PRIVATE F2FS_HAVE_ZSTD)
         target_link_libraries(f2fs_extract PRIVATE ${ZSTD_TARGET})
-        message(STATUS "f2fs_extract: ZSTD enabled")
     else()
-        message(WARNING "f2fs_extract: ZSTD not found")
+        message(WARNING "f2fs_extract: Zstd not available — Zstd-compressed F2FS files will fail to extract")
     endif()
 
-    # ── LZO2 ────────────────────────────────────────────────────────────────
-    # LZO has no official CMakeLists.txt, so we always use the system library.
-    # On Android/MinGW, you can vendor lzo-2.10 sources separately.
-    find_path(LZO_INCLUDE_DIR  NAMES lzo/lzo1x.h)
-    find_library(LZO_LIBRARY   NAMES lzo2)
-    if(LZO_INCLUDE_DIR AND LZO_LIBRARY)
+    # ── LZO (via miniLZO — see src/third_party/minilzo/README.md) ────────────
+    # The full LZO2 distribution only ships an autotools build system, which
+    # is painful to wrap with FetchContent. miniLZO is the upstream-maintained
+    # subset (one .c file + headers) explicitly designed for embedding into
+    # other projects' source trees — same on-disk format, same
+    # lzo1x_1_compress/lzo1x_decompress_safe API we already call, just without
+    # the lzo_init()/version-check ceremony the full library wants. Vendored
+    # from https://github.com/nemequ/lzo (the standard unofficial GitHub
+    # mirror of the oberhumer.com LZO release), GPL-2.0-or-later — compatible
+    # with this project's GPL-3.0 license.
+    if(NOT F2FS_USE_SYSTEM_LIBS)
+        FetchContent_Declare(lzo_src
+            GIT_REPOSITORY https://github.com/nemequ/lzo.git
+            GIT_TAG        master
+            GIT_SHALLOW    TRUE
+        )
+        FetchContent_GetProperties(lzo_src)
+        if(NOT lzo_src_POPULATED)
+            FetchContent_Populate(lzo_src)
+            add_library(minilzo_static STATIC
+                ${lzo_src_SOURCE_DIR}/minilzo/minilzo.c
+            )
+            target_include_directories(minilzo_static PUBLIC
+                ${lzo_src_SOURCE_DIR}/minilzo
+                ${lzo_src_SOURCE_DIR}/include/lzo
+            )
+            add_library(lzo::lzo2 ALIAS minilzo_static)
+        endif()
         set(LZO_FOUND TRUE)
-        add_library(lzo::lzo2 IMPORTED STATIC GLOBAL)
-        set_target_properties(lzo::lzo2 PROPERTIES
-            IMPORTED_LOCATION       "${LZO_LIBRARY}"
-            INTERFACE_INCLUDE_DIRECTORIES "${LZO_INCLUDE_DIR}")
-        target_compile_definitions(f2fs_extract PRIVATE F2FS_HAVE_LZO)
-        target_link_libraries(f2fs_extract PRIVATE lzo::lzo2)
-        message(STATUS "f2fs_extract: LZO enabled (LZO + LZO-RLE)")
+        target_compile_definitions(f2fs_extract PRIVATE F2FS_HAVE_LZO F2FS_LZO_IS_MINILZO)
+        message(STATUS "f2fs_extract: LZO vendored via FetchContent (miniLZO from nemequ/lzo)")
     else()
-        message(WARNING "f2fs_extract: liblzo2 not found — LZO/LZO-RLE compressed files will fail")
+        find_path(LZO_INCLUDE_DIR  NAMES lzo/lzo1x.h)
+        find_library(LZO_LIBRARY   NAMES lzo2)
+        if(LZO_INCLUDE_DIR AND LZO_LIBRARY)
+            set(LZO_FOUND TRUE)
+            add_library(lzo::lzo2 IMPORTED STATIC GLOBAL)
+            set_target_properties(lzo::lzo2 PROPERTIES
+                IMPORTED_LOCATION       "${LZO_LIBRARY}"
+                INTERFACE_INCLUDE_DIRECTORIES "${LZO_INCLUDE_DIR}")
+            target_compile_definitions(f2fs_extract PRIVATE F2FS_HAVE_LZO)
+            message(STATUS "f2fs_extract: LZO found on system (${LZO_LIBRARY})")
+        endif()
+    endif()
+
+    if(LZO_FOUND)
+        target_link_libraries(f2fs_extract PRIVATE lzo::lzo2)
+    else()
+        message(WARNING "f2fs_extract: LZO not available — LZO/LZO-RLE-compressed F2FS files will fail to extract")
     endif()
 endif()
 
@@ -218,6 +258,9 @@ if(ZSTD_FOUND)
 endif()
 if(LZO_FOUND)
     target_compile_definitions(f2fs_compress_test PRIVATE F2FS_HAVE_LZO)
+    if(NOT F2FS_USE_SYSTEM_LIBS)
+        target_compile_definitions(f2fs_compress_test PRIVATE F2FS_LZO_IS_MINILZO)
+    endif()
     target_link_libraries(f2fs_compress_test PRIVATE lzo::lzo2)
 endif()
 

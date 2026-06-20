@@ -32,11 +32,18 @@
 #endif
 
 #ifdef F2FS_HAVE_LZO
-#  include <lzo/lzo1x.h>
-   // liblzo2 requires a one-time init; we use a static guard.
-   static struct LZOInit {
-       LZOInit() { lzo_init(); }
-   } _lzo_init;
+#  ifdef F2FS_LZO_IS_MINILZO
+     // Vendored miniLZO (FetchContent default) — see CMakeLists.txt.
+     // Same lzo1x_1_compress/lzo1x_decompress_safe API as the full library,
+     // but no lzo_init()/version-check ceremony — none needed here.
+#    include <minilzo.h>
+#  else
+     // System liblzo2 (F2FS_USE_SYSTEM_LIBS=ON) — requires a one-time init.
+#    include <lzo/lzo1x.h>
+     static struct LZOInit {
+         LZOInit() { lzo_init(); }
+     } _lzo_init;
+#  endif
 #endif
 
 // ────────────────────────────────────────────────────────────────────────────

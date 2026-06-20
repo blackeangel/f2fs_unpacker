@@ -36,7 +36,11 @@
 #  include <zstd.h>
 #endif
 #ifdef F2FS_HAVE_LZO
-#  include <lzo/lzo1x.h>
+#  ifdef F2FS_LZO_IS_MINILZO
+#    include <minilzo.h>
+#  else
+#    include <lzo/lzo1x.h>
+#  endif
 #endif
 
 static constexpr size_t PAGE_SZ = 4096;
