@@ -1,0 +1,56 @@
+name: Release
+
+# Triggered by pushing a tag like v1.2.0. Reuses the same build matrix as
+# build.yml (workflow_call) so a release is built by the exact same steps
+# that run on every push to main — no separate/divergent release-only build
+# logic to keep in sync.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build:
+    name: Build
+    uses: ./.github/workflows/build.yml
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten and rename for release assets
+        run: |
+          set -e
+          mkdir -p release_assets
+          cd artifacts
+          for dir in */; do
+            artifact_name="${dir%/}"
+            file=$(find "$artifact_name" -maxdepth 1 -type f | head -1)
+            base="$(basename "$file")"
+            case "$base" in
+              *.*) ext=".${base##*.}" ;;
+              *)   ext="" ;;
+            esac
+            cp "$file" "../release_assets/${artifact_name}${ext}"
+          done
+          cd ..
+          echo "Release assets:"
+          ls -la release_assets
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            release_assets/* \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
