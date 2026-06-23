@@ -3,6 +3,7 @@ name: Build
 # Linux + Windows (MinGW cross-compile, no MSYS2) + 4 Android NDK ABIs.
 # Every compression dependency (LZ4/Zstd/LZO) is vendored via FetchContent
 # inside CMakeLists.txt — no apt/pacman packages needed in any job below.
+# All builds are Release + stripped.
 
 on:
   push:
@@ -12,24 +13,13 @@ on:
   workflow_dispatch:
   workflow_call:
 
-env:
-  # Pin a known-good CMake to avoid surprises if a runner image bumps to a
-  # new major version mid-stream. CMakeLists.txt also guards against the
-  # CMake 4.x "cmake_minimum_required too old" hard-error via
-  # CMAKE_POLICY_VERSION_MINIMUM, but pinning here keeps CI reproducible.
-  CMAKE_VERSION: "3.28.3"
-
 jobs:
   # ──────────────────────────────────────────────────────────────────────────
-  # Linux x86_64 — native build, Debug + Release
+  # Linux x86_64 — native Release build
   # ──────────────────────────────────────────────────────────────────────────
   linux:
-    name: Linux x86_64 (${{ matrix.build_type }})
+    name: Linux x86_64
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [Debug, Release]
     steps:
       - uses: actions/checkout@v4
 
@@ -39,9 +29,7 @@ jobs:
           sudo apt-get install -y build-essential cmake
 
       - name: Configure
-        run: >
-          cmake -S . -B build
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build -j"$(nproc)"
@@ -54,13 +42,12 @@ jobs:
           ldd build/f2fs_extract
           ! ldd build/f2fs_extract | grep -qE 'liblz4|libzstd|liblzo2'
 
-      - name: Strip binary (Release only)
-        if: matrix.build_type == 'Release'
+      - name: Strip
         run: strip build/f2fs_extract
 
       - uses: actions/upload-artifact@v4
         with:
-          name: f2fs_extract-linux-x86_64-${{ matrix.build_type }}
+          name: f2fs_extract-linux-x86_64
           path: build/f2fs_extract
           if-no-files-found: error
 
@@ -72,12 +59,8 @@ jobs:
   # Ubuntu runner sidesteps entirely.
   # ──────────────────────────────────────────────────────────────────────────
   windows-mingw:
-    name: Windows x86_64 MinGW (${{ matrix.build_type }})
+    name: Windows x86_64 MinGW
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        build_type: [Debug, Release]
     steps:
       - uses: actions/checkout@v4
 
@@ -89,7 +72,7 @@ jobs:
       - name: Configure
         run: >
           cmake -S . -B build
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_SYSTEM_NAME=Windows
           -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc
           -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++
@@ -101,19 +84,18 @@ jobs:
       - name: Verify PE32+ output
         run: file build/f2fs_extract.exe | grep -q "PE32+"
 
-      - name: Strip binary (Release only)
-        if: matrix.build_type == 'Release'
+      - name: Strip
         run: x86_64-w64-mingw32-strip build/f2fs_extract.exe
 
       - uses: actions/upload-artifact@v4
         with:
-          name: f2fs_extract-windows-x86_64-${{ matrix.build_type }}
+          name: f2fs_extract-windows-x86_64
           path: build/f2fs_extract.exe
           if-no-files-found: error
 
   # ──────────────────────────────────────────────────────────────────────────
-  # Android NDK — 4 ABIs, Release only (matches md1img_repacker/tar_repacker
-  # convention: device builds ship Release, Debug is a desktop-only concern).
+  # Android NDK — 4 ABIs
+  # Uses llvm-strip from the NDK toolchain (bundled, no separate install).
   # ──────────────────────────────────────────────────────────────────────────
   android:
     name: Android ${{ matrix.abi }}
@@ -139,20 +121,25 @@ jobs:
 
       - name: Configure
         run: >
-          cmake -S . -B build-${{ matrix.abi }}
+          cmake -S . -B build
           -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake
           -DANDROID_ABI=${{ matrix.abi }}
           -DANDROID_PLATFORM=android-26
           -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build-${{ matrix.abi }} -j"$(nproc)"
+        run: cmake --build build -j"$(nproc)"
 
       - name: Verify ELF output
-        run: file build-${{ matrix.abi }}/f2fs_extract | grep -q "ELF"
+        run: file build/f2fs_extract | grep -q "ELF"
+
+      - name: Strip
+        run: |
+          LLVM_STRIP="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          "$LLVM_STRIP" build/f2fs_extract
 
       - uses: actions/upload-artifact@v4
         with:
           name: f2fs_extract-android-${{ matrix.abi }}
-          path: build-${{ matrix.abi }}/f2fs_extract
+          path: build/f2fs_extract
           if-no-files-found: error
