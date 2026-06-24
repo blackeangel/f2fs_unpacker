@@ -960,18 +960,17 @@ FileMetadata F2FSExtractor::buildMetadata(const std::string& relpath,
                                            const XAttrMap&    xm) const
 {
     FileMetadata m;
-    m.path      = relpath;
-    m.mode      = inode.i_mode;
-    m.uid       = inode.i_uid;
-    m.gid       = inode.i_gid;
-    m.size      = inode.i_size;
-    m.xattrs    = xm;
+    m.path   = relpath;
+    m.mode   = inode.i_mode;
+    m.uid    = inode.i_uid;
+    m.gid    = inode.i_gid;
+    m.size   = inode.i_size;
+    m.xattrs = xm;
 
     // ── Parse security.selinux ───────────────────────────────────────────────
     auto it_sel = xm.find("security.selinux");
     if (it_sel != xm.end()) {
         const auto& v = it_sel->second;
-        // Strip trailing null byte(s) if present
         size_t len = v.size();
         while (len > 0 && v[len-1] == '\0') --len;
         m.selinux_label = std::string(
@@ -992,6 +991,32 @@ FileMetadata F2FSExtractor::buildMetadata(const std::string& relpath,
             }
         }
     }
+
+    // ── F2FS-specific attributes ─────────────────────────────────────────────
+
+    // Transparent compression
+    if (inode.i_flags & F2FS_COMPR_FL) {
+        m.f2fs_compressed   = true;
+        m.compress_algo     = inode.i_compress_algorithm;
+        m.log_cluster_size  = inode.i_log_cluster_size;
+        m.compr_blocks      = inode.i_compr_blocks;
+        m.compress_released = (inode.i_inline & F2FS_COMPRESS_RELEASED) != 0;
+    }
+
+    // Encryption
+    m.f2fs_encrypted    = (inode.i_flags & F2FS_ENCRYPT_FL) != 0;
+
+    // Inline data: both INLINE_DATA and DATA_EXIST must be set for data to
+    // actually be present inside the inode (INLINE_DATA alone just means
+    // the feature is enabled; DATA_EXIST means there's data to read).
+    m.f2fs_inline_data  = (inode.i_inline & F2FS_INLINE_DATA) != 0
+                       && (inode.i_inline & F2FS_DATA_EXIST)  != 0;
+
+    // Inline dentries (small directories whose dentry table lives in the inode)
+    m.f2fs_inline_dents = (inode.i_inline & F2FS_INLINE_DENTS) != 0;
+
+    // Pinned: GC will not relocate this file's blocks
+    m.f2fs_pinned       = (inode.i_inline & F2FS_PIN_FILE) != 0;
 
     return m;
 }

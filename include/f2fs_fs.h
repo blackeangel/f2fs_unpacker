@@ -71,6 +71,8 @@ static constexpr u8 F2FS_INLINE_DENTS  = 0x04; // small dirs: dentries inside in
 static constexpr u8 F2FS_DATA_EXIST    = 0x08; // inline data actually present
 static constexpr u8 F2FS_INLINE_DOTS   = 0x10; // implicit "." and ".." dentries
 static constexpr u8 F2FS_EXTRA_ATTR    = 0x20; // inode has extra attribute region
+static constexpr u8 F2FS_PIN_FILE       = 0x40; // file should not be garbage-collected
+static constexpr u8 F2FS_COMPRESS_RELEASED = 0x80; // compressed blocks were released (freed)
 
 // ────────────────────────────────────────────────────────────────────────────
 // File types used in directory entries
