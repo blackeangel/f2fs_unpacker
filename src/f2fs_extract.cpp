@@ -444,6 +444,14 @@ bool F2FSExtractor::extractAll(const std::string& outdir)
         applyTimestamps(outdir, root_node.i);
     }
 
+    if (symlinks_skipped_ > 0) {
+        logf(LogLevel::WARN,
+             "Skipped %u symlink(s): target filesystem doesn't support them "
+             "(e.g. Android FUSE / exFAT). "
+             "Symlink targets are preserved in _metadata/fs_config.txt.",
+             symlinks_skipped_);
+    }
+
     return ok;
 }
 
@@ -606,6 +614,39 @@ bool F2FSExtractor::extractCompressedFile(const f2fs_inode& inode,
     const u32 cluster_sz  = 1u << inode.i_log_cluster_size;  // pages per cluster
     const u8  algo        = inode.i_compress_algorithm;
 
+    // ── Compress-released files (Samsung et al.) ──────────────────────────────
+    // Some OEM image builders (notably Samsung) compress files and then call
+    // F2FS_IOC_RELEASE_COMPRESS_BLOCKS to free the compressed blocks, shrinking
+    // the final image.  After this operation:
+    //   - F2FS_COMPRESS_RELEASED (i_inline bit 0x80) is set
+    //   - Physical block addresses in i_addr may be NULL_ADDR or stale addresses
+    //     that now point BEYOND the shrunken image's EOF
+    // The kernel returns zeros when reading such a file at runtime (the blocks
+    // are simply gone), so we do the same: write i_size zero bytes and skip all
+    // block reads.
+    if (inode.i_inline & F2FS_COMPRESS_RELEASED) {
+        logf(LogLevel::INFO,
+             "Compressed-released (blocks freed by OEM): writing %llu zero bytes  %s",
+             (unsigned long long)file_size, outpath.c_str());
+        FILE* zf = ::fopen(outpath.c_str(), "wb");
+        if (!zf) {
+            logf(LogLevel::ERR, "fopen(%s): %s", outpath.c_str(), strerror(errno));
+            return false;
+        }
+        const std::vector<u8> zeros(std::min(file_size, (u64)blksize_), 0);
+        for (u64 rem = file_size; rem > 0; ) {
+            const size_t chunk = (size_t)std::min(rem, (u64)zeros.size());
+            if (::fwrite(zeros.data(), 1, chunk, zf) != chunk) {
+                logf(LogLevel::ERR, "fwrite(%s): %s", outpath.c_str(), strerror(errno));
+                ::fclose(zf);
+                return false;
+            }
+            rem -= chunk;
+        }
+        ::fclose(zf);
+        return true;
+    }
+
     logf(LogLevel::INFO, "Compressed file: algo=%u cluster_pages=%u size=%llu  %s",
          (u32)algo, cluster_sz, (unsigned long long)file_size, outpath.c_str());
 
@@ -758,6 +799,16 @@ bool F2FSExtractor::extractSymlink(const f2fs_inode& inode, const std::string& o
 
     fs::create_symlink(target, outpath, ec);
     if (ec) {
+        // ENOSYS / EPERM: the target filesystem (e.g. Android FUSE / sdcard /
+        // Windows) doesn't support symlinks at all. This is expected when
+        // extracting to /storage/emulated/0/ on Android. Don't spam per-link
+        // warnings — increment a counter and report a single summary at the end.
+        // The symlink target is preserved in the metadata files.
+        const int e = ec.value();
+        if (e == ENOSYS || e == EPERM || e == ENOTSUP || e == EPERM) {
+            ++symlinks_skipped_;
+            return true;   // not an extraction failure
+        }
         logf(LogLevel::WARN, "symlink(%s → %s): %s",
              outpath.c_str(), target.c_str(), ec.message().c_str());
         return false;

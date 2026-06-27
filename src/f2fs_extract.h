@@ -136,6 +136,7 @@ private:
     bool            collect_metadata_ = false;
     MetadataWriter  meta_;
     std::string     outdir_base_;   // set in extractAll(), used for relative paths
+    uint32_t        symlinks_skipped_ = 0; // FUSE/FAT targets that can't hold symlinks
 
     // Read all xattrs for an inode (inline + external node)
     XAttrMap readXAttrs(const f2fs_inode& inode) const;
