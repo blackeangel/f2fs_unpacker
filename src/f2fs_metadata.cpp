@@ -198,22 +198,24 @@ bool MetadataWriter::writeF2FSSpecial(const std::string& path) const
           "# format: path  attribute  [attribute ...]\n"
           "#\n"
           "# Attributes:\n"
+          "#   symlink:target=<path>  — symlink destination (critical on FUSE/exFAT where\n"
+          "#                            symlinks cannot be created during extraction)\n"
           "#   compress:algo=<lzo|lz4|zstd|lzorle>,log_cluster=<n>,saved_blocks=<n>[,released]\n"
           "#     log_cluster: cluster = (1 << n) pages = (1 << n) x 4096 bytes\n"
           "#     saved_blocks: number of 4K blocks saved by compression\n"
           "#     released: compressed blocks were freed (COMPRESS_RELEASED flag)\n"
-          "#   encrypt     — file content is encrypted (FBE)\n"
-          "#   inline_data — file content stored inside the inode block\n"
+          "#   encrypt      — file content is encrypted (FBE)\n"
+          "#   inline_data  — regular file content stored inside the inode block\n"
           "#   inline_dents — directory entries stored inside the inode block\n"
-          "#   pinned      — file pinned in place, GC will not move it\n"
+          "#   pinned       — file pinned in place, GC will not move it\n"
           "#\n"
-          "# Only entries with at least one F2FS-specific attribute are listed.\n"
-          "# Files without any such attribute are omitted (standard POSIX behaviour).\n",
+          "# Only entries with at least one attribute are listed.\n",
           f);
 
     std::vector<const FileMetadata*> sorted;
     for (const auto& m : entries_) {
-        if (m.f2fs_compressed || m.f2fs_encrypted ||
+        const bool is_symlink = !m.symlink_target.empty();
+        if (is_symlink || m.f2fs_compressed || m.f2fs_encrypted ||
             m.f2fs_inline_data || m.f2fs_inline_dents || m.f2fs_pinned)
             sorted.push_back(&m);
     }
@@ -225,6 +227,10 @@ bool MetadataWriter::writeF2FSSpecial(const std::string& path) const
     for (const auto* m : sorted) {
         std::string p = m->path.empty() ? "/" : m->path;
         fprintf(f, "%s", p.c_str());
+
+        // Symlink target — first so it's easy to grep/parse
+        if (!m->symlink_target.empty())
+            fprintf(f, "\tsymlink:target=%s", m->symlink_target.c_str());
 
         if (m->f2fs_compressed) {
             const char* aname = (m->compress_algo < 4)

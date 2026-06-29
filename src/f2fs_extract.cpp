@@ -1058,9 +1058,11 @@ FileMetadata F2FSExtractor::buildMetadata(const std::string& relpath,
     m.f2fs_encrypted    = (inode.i_flags & F2FS_ENCRYPT_FL) != 0;
 
     // Inline data: both INLINE_DATA and DATA_EXIST must be set for data to
-    // actually be present inside the inode (INLINE_DATA alone just means
-    // the feature is enabled; DATA_EXIST means there's data to read).
-    m.f2fs_inline_data  = (inode.i_inline & F2FS_INLINE_DATA) != 0
+    // actually be present inside the inode. Exclude symlinks: their target
+    // is trivially always stored "inline" in F2FS for short paths, so the
+    // flag carries no useful information and would clutter f2fs_special.txt.
+    m.f2fs_inline_data  = S_ISREG(inode.i_mode)
+                       && (inode.i_inline & F2FS_INLINE_DATA) != 0
                        && (inode.i_inline & F2FS_DATA_EXIST)  != 0;
 
     // Inline dentries (small directories whose dentry table lives in the inode)
