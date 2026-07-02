@@ -840,11 +840,17 @@ bool F2FSExtractor::extractSymlink(const f2fs_inode& inode, const std::string& o
     // but silently discard the link (no ENOSYS, no error — the call just does
     // nothing). Detect this by verifying the path actually exists afterward.
     // If it doesn't, treat it the same as a filesystem-capability skip.
-    struct stat st;
-    if (::lstat(outpath.c_str(), &st) != 0) {
-        ++symlinks_skipped_;
-        return true;
+    // Windows/MinGW: create_symlink() never silently succeeds without creating
+    // the link, so no cross-check is needed (and ::lstat is not available).
+#if !defined(_WIN32) && !defined(__MINGW32__)
+    {
+        struct stat st;
+        if (::lstat(outpath.c_str(), &st) != 0) {
+            ++symlinks_skipped_;
+            return true;
+        }
     }
+#endif
     return true;
 }
 
