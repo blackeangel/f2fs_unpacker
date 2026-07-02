@@ -112,6 +112,18 @@ bool F2FSExtractor::readAt(off_t offset, void* buf, size_t size) const
 
 bool F2FSExtractor::readBlock(u32 blkno, void* buf) const
 {
+    // Detect stale block addresses beyond the image boundary.
+    // Samsung builds some partitions by creating a full-size F2FS image, filling
+    // it with data, then shrinking it (truncating / punching holes). After
+    // shrinking, inode block pointers that used to be valid now point beyond
+    // the image's EOF. Rather than failing the whole file, we return a zero
+    // block (matching what the kernel does for punched-out or unallocated blocks)
+    // and count the occurrences so we can report them as a summary.
+    if (total_block_count_ > 0 && (u64)blkno >= total_block_count_) {
+        ++stale_blocks_read_;
+        memset(buf, 0, blksize_);
+        return true;
+    }
     return readAt((off_t)blkno * blksize_, buf, blksize_);
 }
 
@@ -156,8 +168,9 @@ bool F2FSExtractor::readSuperblock()
     return false;
 
 found:
-    blksize_       = 1u << sb_.log_blocksize;
-    blocks_per_seg_= 1u << sb_.log_blocks_per_seg;
+    blksize_            = 1u << sb_.log_blocksize;
+    blocks_per_seg_     = 1u << sb_.log_blocks_per_seg;
+    total_block_count_  = sb_.block_count;
 
     if (blksize_ != F2FS_BLKSIZE) {
         logf(LogLevel::ERR, "Unsupported block size %u (only 4096 supported)", blksize_);
@@ -448,8 +461,17 @@ bool F2FSExtractor::extractAll(const std::string& outdir)
         logf(LogLevel::WARN,
              "Skipped %u symlink(s): target filesystem doesn't support them "
              "(e.g. Android FUSE / exFAT). "
-             "Symlink targets are preserved in _metadata/fs_config.txt.",
+             "Symlink targets are preserved in _metadata/f2fs_special.txt.",
              symlinks_skipped_);
+    }
+
+    if (stale_blocks_read_ > 0) {
+        logf(LogLevel::WARN,
+             "Read %llu block(s) with addresses beyond image EOF (zeroed). "
+             "This is normal for Samsung images that were shrunk after creation "
+             "(fallocate/punch_hole). Affected files contain zeros where the "
+             "original data was.",
+             (unsigned long long)stale_blocks_read_);
     }
 
     return ok;
@@ -799,19 +821,29 @@ bool F2FSExtractor::extractSymlink(const f2fs_inode& inode, const std::string& o
 
     fs::create_symlink(target, outpath, ec);
     if (ec) {
-        // ENOSYS / EPERM: the target filesystem (e.g. Android FUSE / sdcard /
-        // Windows) doesn't support symlinks at all. This is expected when
+        // ENOSYS / EPERM / ENOTSUP: the target filesystem (e.g. Android FUSE /
+        // sdcard / Windows) doesn't support symlinks at all. Expected when
         // extracting to /storage/emulated/0/ on Android. Don't spam per-link
         // warnings — increment a counter and report a single summary at the end.
         // The symlink target is preserved in the metadata files.
         const int e = ec.value();
-        if (e == ENOSYS || e == EPERM || e == ENOTSUP || e == EPERM) {
+        if (e == ENOSYS || e == EPERM || e == ENOTSUP) {
             ++symlinks_skipped_;
             return true;   // not an extraction failure
         }
         logf(LogLevel::WARN, "symlink(%s → %s): %s",
              outpath.c_str(), target.c_str(), ec.message().c_str());
         return false;
+    }
+
+    // Sanity-check: some Android FUSE implementations return 0 from symlink()
+    // but silently discard the link (no ENOSYS, no error — the call just does
+    // nothing). Detect this by verifying the path actually exists afterward.
+    // If it doesn't, treat it the same as a filesystem-capability skip.
+    struct stat st;
+    if (::lstat(outpath.c_str(), &st) != 0) {
+        ++symlinks_skipped_;
+        return true;
     }
     return true;
 }
@@ -1151,7 +1183,12 @@ void F2FSExtractor::applyTimestamps(const std::string& outpath,
 
     // AT_SYMLINK_NOFOLLOW: for symlinks, stamp the link itself, not its target.
     if (::utimensat(AT_FDCWD, outpath.c_str(), times, AT_SYMLINK_NOFOLLOW) != 0) {
-        logf(LogLevel::WARN, "utimensat(%s): %s", outpath.c_str(), strerror(errno));
+        // ENOENT: the path doesn't exist — this happens when a symlink was
+        // silently discarded by FUSE (symlink() returned 0 but didn't create
+        // the link). Detected and counted in extractSymlink(); no need to warn
+        // again here since the summary message covers it.
+        if (errno != ENOENT)
+            logf(LogLevel::WARN, "utimensat(%s): %s", outpath.c_str(), strerror(errno));
     }
 #endif
 }
