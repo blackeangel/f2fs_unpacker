@@ -68,6 +68,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake mingw-w64
+          # Use posix thread model — required for full C++17 std::filesystem
+          # support and more consistent across Ubuntu package versions.
+          sudo update-alternatives --set \
+            x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+          sudo update-alternatives --set \
+            x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
 
       - name: Configure
         run: >
