@@ -839,18 +839,16 @@ bool F2FSExtractor::extractSymlink(const f2fs_inode& inode, const std::string& o
     // Sanity-check: some Android FUSE implementations return 0 from symlink()
     // but silently discard the link (no ENOSYS, no error — the call just does
     // nothing). Detect this by verifying the path actually exists afterward.
-    // If it doesn't, treat it the same as a filesystem-capability skip.
-    // Windows/MinGW: create_symlink() never silently succeeds without creating
-    // the link, so no cross-check is needed (and ::lstat is not available).
-#if !defined(_WIN32) && !defined(__MINGW32__)
+    // Use symlink_status() (= lstat semantics, doesn't follow the link) via
+    // std::filesystem so no platform-specific lstat() call is needed here.
     {
-        struct stat st;
-        if (::lstat(outpath.c_str(), &st) != 0) {
+        std::error_code ec2;
+        (void)fs::symlink_status(outpath, ec2);
+        if (ec2) {
             ++symlinks_skipped_;
             return true;
         }
     }
-#endif
     return true;
 }
 
