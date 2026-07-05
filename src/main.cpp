@@ -112,6 +112,7 @@ int main(int argc, char* argv[])
     }
 
     if (do_meta) {
+        extractor.enrichMetadata(out_dir);
         fprintf(stdout, "Saving metadata to %s/ ...\n", meta_dir.c_str());
         if (!extractor.saveMetadata(meta_dir)) {
             fprintf(stderr, "Metadata save failed.\n");

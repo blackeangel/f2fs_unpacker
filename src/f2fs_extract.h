@@ -39,6 +39,16 @@ public:
     // Enable metadata collection.
     // After extractAll(), call saveMetadata(dir) to write the three files.
     void enableMetadata() { collect_metadata_ = true; }
+
+    // Enrich already-collected metadata from Android runtime config files
+    // embedded inside the extracted output tree:
+    //   - etc/fs_config_files, etc/fs_config_dirs  (binary, AOSP format)
+    //     → capabilities that weren't stored as xattrs (Samsung Android 14)
+    //   - etc/selinux/plat_file_contexts etc.       (text, regex patterns)
+    //     → SELinux labels for images without security.selinux xattrs
+    // Call between extractAll() and saveMetadata().
+    void enrichMetadata(const std::string& out_dir);
+
     bool saveMetadata(const std::string& dir) const {
         return meta_.writeAll(dir);
     }

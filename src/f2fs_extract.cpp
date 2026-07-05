@@ -1198,8 +1198,46 @@ void F2FSExtractor::applyTimestamps(const std::string& outpath,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// printInfo
+// enrichMetadata
 // ════════════════════════════════════════════════════════════════════════════
+
+void F2FSExtractor::enrichMetadata(const std::string& out_dir)
+{
+    if (!collect_metadata_) return;
+
+    // ── Binary fs_config_files / fs_config_dirs ────────────────────────────
+    // Android embeds a compiled binary at a well-known path inside each
+    // partition. Samsung Android 14 uses these instead of security.capability
+    // xattrs to record per-file capabilities. We probe the most common
+    // locations: partition root etc/ and the nested system/etc/ (SAR images).
+    static const char* const fs_config_names[] = {
+        "/etc/fs_config_files",
+        "/etc/fs_config_dirs",
+        "/system/etc/fs_config_files",
+        "/system/etc/fs_config_dirs",
+        "/vendor/etc/fs_config_files",
+        "/vendor/etc/fs_config_dirs",
+        nullptr
+    };
+    for (int i = 0; fs_config_names[i]; ++i)
+        meta_.enrichFromFsConfigBinary(out_dir + fs_config_names[i]);
+
+    // ── Text SELinux file_contexts ─────────────────────────────────────────
+    // Samsung (and AOSP) stores per-partition SELinux policy in text files
+    // inside the partition itself. When the image has no security.selinux
+    // xattrs (common), these text files are the only source of label data.
+    static const char* const ctx_paths[] = {
+        "/etc/selinux/plat_file_contexts",
+        "/system/etc/selinux/plat_file_contexts",
+        "/etc/selinux/vendor_file_contexts",
+        "/vendor/etc/selinux/vendor_file_contexts",
+        "/etc/selinux/product_file_contexts",
+        "/etc/selinux/system_ext_file_contexts",
+        nullptr
+    };
+    for (int i = 0; ctx_paths[i]; ++i)
+        meta_.enrichFromFileContextsText(out_dir + ctx_paths[i]);
+}
 
 void F2FSExtractor::printInfo() const
 {

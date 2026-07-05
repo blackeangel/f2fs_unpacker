@@ -341,3 +341,174 @@ bool MetadataWriter::writeAll(const std::string& dir) const
         fprintf(stdout, "Metadata written to %s/\n", dir.c_str());
     return ok;
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// enrichFromFsConfigBinary
+//
+// Reads a compiled AOSP fs_config binary (etc/fs_config_files or
+// etc/fs_config_dirs) and merges uid/gid/mode/capabilities into the
+// already-built entry map.
+//
+// Binary record format (AOSP system/core/include/private/android_filesystem_config.h):
+//   uint16_t  len           total record length including this field
+//   uint16_t  mode
+//   uint16_t  uid
+//   uint16_t  gid
+//   uint64_t  capabilities  (little-endian)
+//   char      path[]        null-terminated, runs to end of record (len bytes total)
+//
+// Samsung Android 14 stores capabilities here rather than as
+// security.capability xattrs, so this is the only reliable source.
+// ════════════════════════════════════════════════════════════════════════════
+
+bool MetadataWriter::enrichFromFsConfigBinary(const std::string& bin_path)
+{
+    FILE* f = fopen(bin_path.c_str(), "rb");
+    if (!f) return false;
+
+    fseek(f, 0, SEEK_END);
+    const long fsz = ftell(f);
+    rewind(f);
+    if (fsz <= 0) { fclose(f); return false; }
+
+    std::vector<uint8_t> data(static_cast<size_t>(fsz));
+    if (fread(data.data(), 1, data.size(), f) != data.size()) { fclose(f); return false; }
+    fclose(f);
+
+    // Build path → entry* map (with leading slash, matching FileMetadata convention)
+    std::map<std::string, FileMetadata*> by_path;
+    for (auto& m : entries_) by_path[m.path] = &m;
+
+    size_t offset  = 0;
+    int    merged  = 0;
+    int    records = 0;
+
+    while (offset + 16 <= data.size()) {
+        const uint16_t len = static_cast<uint16_t>(data[offset] | (data[offset+1] << 8));
+        if (len < 16 || offset + len > data.size()) break;
+
+        const uint16_t mode = static_cast<uint16_t>(data[offset+2] | (data[offset+3] << 8));
+        const uint16_t uid  = static_cast<uint16_t>(data[offset+4] | (data[offset+5] << 8));
+        const uint16_t gid  = static_cast<uint16_t>(data[offset+6] | (data[offset+7] << 8));
+
+        uint64_t caps = 0;
+        for (int i = 0; i < 8; i++)
+            caps |= static_cast<uint64_t>(data[offset + 8 + i]) << (i * 8);
+
+        // Path sits immediately after the 16-byte fixed header,
+        // null-terminated within the record boundary.
+        const char* raw = reinterpret_cast<const char*>(data.data() + offset + 16);
+        const size_t max_path = len - 16;
+        const size_t path_len = strnlen(raw, max_path);
+        const std::string raw_path(raw, path_len);
+
+        offset += len;
+        ++records;
+        if (raw_path.empty()) continue;
+
+        // The binary stores paths WITHOUT a leading slash.
+        // Our FileMetadata paths have a leading slash.
+        const std::string lookup = "/" + raw_path;
+
+        auto it = by_path.find(lookup);
+        if (it != by_path.end()) {
+            FileMetadata* m = it->second;
+            // Overwrite uid/gid/mode only if the binary has non-default values
+            // and our xattr-read didn't produce anything meaningful.
+            // Always write capabilities since that's the primary purpose here.
+            if (caps != 0) {
+                m->capabilities = caps;
+                m->has_caps     = true;
+                ++merged;
+            }
+            // Only override uid/gid if our current values look default
+            if (m->uid == 0 && uid != 0) m->uid = uid;
+            if (m->gid == 0 && gid != 0) m->gid = gid;
+            (void)mode; // mode from binary is usually less authoritative than inode
+        }
+    }
+
+    if (records > 0)
+        fprintf(stdout, "[INF] fs_config binary %s: %d records, merged %d capabilities\n",
+                bin_path.c_str(), records, merged);
+    return records > 0;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// enrichFromFileContextsText
+//
+// Reads a text-format SELinux file_contexts file (e.g. Android's
+// etc/selinux/plat_file_contexts) and fills selinux_label for entries
+// that currently have no label.
+//
+// The file uses PCRE-based path patterns. We only process EXACT path
+// patterns (no regex metacharacters) to avoid false matches. In practice
+// the vast majority of Android file_contexts entries are exact paths anyway.
+//
+// If the image has NO security.selinux xattrs at all (typical for Samsung),
+// this populates file_contexts.txt with the labels that Android would apply
+// at runtime when the partition is mounted.
+// ════════════════════════════════════════════════════════════════════════════
+
+bool MetadataWriter::enrichFromFileContextsText(const std::string& txt_path)
+{
+    FILE* f = fopen(txt_path.c_str(), "r");
+    if (!f) return false;
+
+    // Build map for quick lookup
+    std::map<std::string, FileMetadata*> by_path;
+    for (auto& m : entries_)
+        if (m.selinux_label.empty()) by_path[m.path] = &m;
+
+    char line[4096];
+    int matched = 0;
+    int skipped_regex = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (*p == '#' || *p == '\n' || *p == '\r' || *p == '\0') continue;
+
+        char raw_path[2048] = {}, label[256] = {};
+        if (sscanf(p, "%2047s %255s", raw_path, label) < 2) continue;
+
+        // Skip pure-regex wildcards but allow escaped dots and simple anchors
+        bool has_meta = false;
+        for (const char* c = raw_path; *c; ++c) {
+            if (*c == '(' || *c == ')' || *c == '[' || *c == ']' ||
+                *c == '+' || *c == '*' || *c == '?') {
+                has_meta = true;
+                break;
+            }
+            // skip escaped characters: \. \/ etc — unescape below
+        }
+        if (has_meta) { ++skipped_regex; continue; }
+
+        // Unescape: \. → .   \- → -   etc.
+        std::string clean;
+        clean.reserve(strlen(raw_path));
+        for (const char* c = raw_path; *c; ++c) {
+            if (*c == '\\' && *(c + 1)) { clean += *++c; }
+            else                         { clean += *c;   }
+        }
+
+        // Strip trailing whitespace / newline from label
+        std::string slabel(label);
+        while (!slabel.empty() && (slabel.back() == '\n' || slabel.back() == '\r' ||
+               slabel.back() == ' ' || slabel.back() == '\t'))
+            slabel.pop_back();
+        if (slabel.empty()) continue;
+
+        auto it = by_path.find(clean);
+        if (it != by_path.end()) {
+            it->second->selinux_label = slabel;
+            ++matched;
+        }
+    }
+
+    fclose(f);
+    if (matched > 0)
+        fprintf(stdout, "[INF] file_contexts %s: matched %d entries (skipped %d regex patterns)\n",
+                txt_path.c_str(), matched, skipped_regex);
+    return matched > 0;
+}

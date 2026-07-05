@@ -86,6 +86,23 @@ public:
     bool writeFileContexts(const std::string& path) const;
     bool writeF2FSSpecial (const std::string& path) const;
 
+    // Post-extraction enrichment: merge data from Android runtime config files
+    // that are embedded inside the extracted partition tree.
+    //
+    // enrichFromFsConfigBinary() reads a compiled AOSP fs_config binary
+    // (etc/fs_config_files or etc/fs_config_dirs) and merges uid/gid/mode/
+    // capabilities into entries that were read from the F2FS image itself.
+    // Capabilities are the primary target — Samsung Android 14 stores them
+    // here rather than as security.capability xattrs.
+    //
+    // enrichFromFileContextsText() reads a text-format SELinux file_contexts
+    // file (e.g. etc/selinux/plat_file_contexts) and fills in selinux_label
+    // for entries that have no label yet (= not stored as xattr in the image).
+    //
+    // Both are no-ops (return false silently) if the file doesn't exist.
+    bool enrichFromFsConfigBinary    (const std::string& bin_path);
+    bool enrichFromFileContextsText  (const std::string& txt_path);
+
 private:
     std::vector<FileMetadata> entries_;
 
