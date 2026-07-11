@@ -42,7 +42,8 @@ struct FileMetadata {
     std::string symlink_target;
 
     // ── SELinux (→ file_contexts.txt) ────────────────────────────────────────
-    std::string selinux_label;      // security.selinux, null-terminator stripped
+    std::string selinux_label;         // security.selinux, null-terminator stripped
+    bool        selinux_from_xattr = false; // true only when sourced from actual xattr
 
     // ── Linux capabilities (→ fs_config.txt caps column) ────────────────────
     uint64_t    capabilities = 0;
@@ -105,6 +106,11 @@ public:
 
 private:
     std::vector<FileMetadata> entries_;
+    // Paths of embedded SELinux text context files found inside the image.
+    // When file_contexts.txt is written and there are no xattr-based labels,
+    // the first found file is copied verbatim (preserving all regex patterns
+    // that sload.f2fs -s needs).
+    std::vector<std::string>  embedded_ctx_files_;
 
     static std::string octalMode(uint16_t mode);
     static std::string typeChar (uint16_t mode);

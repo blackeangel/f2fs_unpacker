@@ -1060,8 +1060,8 @@ FileMetadata F2FSExtractor::buildMetadata(const std::string& relpath,
         const auto& v = it_sel->second;
         size_t len = v.size();
         while (len > 0 && v[len-1] == '\0') --len;
-        m.selinux_label = std::string(
-            reinterpret_cast<const char*>(v.data()), len);
+        m.selinux_label      = std::string(reinterpret_cast<const char*>(v.data()), len);
+        m.selinux_from_xattr = true;
     }
 
     // ── Parse security.capability (vfs_cap_data, 20 bytes) ───────────────────
