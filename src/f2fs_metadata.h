@@ -61,8 +61,21 @@ struct FileMetadata {
     uint64_t compr_blocks        = 0;   // i_compr_blocks: saved blocks count
     bool     compress_released   = false; // F2FS_COMPRESS_RELEASED: blocks freed
 
-    // Encryption (F2FS_ENCRYPT_FL in i_flags)
+    // Encryption (FADVISE_ENCRYPT_BIT in i_advise — see f2fs_fs.h for why
+    // this is i_advise and not i_flags, contrary to the ext4-style naming)
     bool     f2fs_encrypted      = false;
+
+    // fsverity: file content is integrity-protected and read-only enforced
+    // by the kernel (FADVISE_VERITY_BIT in i_advise)
+    bool     f2fs_verity         = false;
+
+    // Case-insensitive directory lookups (F2FS_CASEFOLD_FL in i_flags,
+    // directories only)
+    bool     f2fs_casefold       = false;
+
+    // Project quota ID (only meaningful when F2FS_EXTRA_ATTR is set and
+    // the value is non-default; 0 = not set / default project)
+    uint32_t project_id          = 0;
 
     // Inline storage
     bool     f2fs_inline_data    = false; // file content stored inside inode

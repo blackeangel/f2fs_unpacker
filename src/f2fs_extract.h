@@ -64,6 +64,7 @@ private:
     u32 blksize_           {F2FS_BLKSIZE};
     u64 total_block_count_ {0};            // from superblock — used to detect stale addresses
     mutable u64 stale_blocks_read_ {0};    // blocks beyond image EOF (silently zeroed)
+    u32 encrypted_dirs_skipped_ {0};       // fscrypt-encrypted subtrees skipped entirely
     u32 blocks_per_seg_{512};
 
     bool readSuperblock();

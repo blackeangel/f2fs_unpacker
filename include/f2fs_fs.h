@@ -75,6 +75,39 @@ static constexpr u8 F2FS_PIN_FILE       = 0x40; // file should not be garbage-co
 static constexpr u8 F2FS_COMPRESS_RELEASED = 0x80; // compressed blocks were released (freed)
 
 // ────────────────────────────────────────────────────────────────────────────
+// i_advise flags — "file hints" byte, COMPLETELY SEPARATE from i_inline above.
+// (linux/f2fs_fs.h FADVISE_*_BIT, verified against kernel fs/f2fs/f2fs.h)
+//
+// IMPORTANT: this is where fscrypt encryption/verity are actually recorded
+// on disk. There is NO F2FS_ENCRYPT_FL bit in i_flags — despite the name
+// suggesting an ext4-style FS_ENCRYPT_FL analogy, F2FS's i_flags bitmap
+// (f2fs_fsflags_map[] in kernel fs/f2fs/file.c) never includes an encryption
+// bit at all. The VFS-visible S_ENCRYPTED state (and what chattr/lsattr show
+// as FS_ENCRYPT_FL) is synthesized at runtime purely from
+// file_is_encrypt(inode) = (i_advise & FADVISE_ENCRYPT_BIT), confirmed in
+// f2fs_set_inode_flags() (fs/f2fs/inode.c) and f2fs_ioc_fsgetxattr()
+// (fs/f2fs/file.c). The official fsck.f2fs/dump.f2fs tools use exactly this
+// same field (file_enc_name() macro) to decide whether a dentry name is
+// ciphertext before printing it.
+// ────────────────────────────────────────────────────────────────────────────
+static constexpr u8 FADVISE_COLD_BIT      = 0x01; // data temperature hint (archival)
+static constexpr u8 FADVISE_LOST_PINO_BIT = 0x02; // transient fsck/recovery hint
+static constexpr u8 FADVISE_ENCRYPT_BIT   = 0x04; // file content is fscrypt-encrypted
+static constexpr u8 FADVISE_ENC_NAME_BIT  = 0x08; // THIS inode's dentry name (in its
+                                                    // parent's dentry block) is ciphertext
+static constexpr u8 FADVISE_KEEP_SIZE_BIT = 0x10; // transient fallocate hint
+static constexpr u8 FADVISE_HOT_BIT       = 0x20; // data temperature hint (frequently written)
+static constexpr u8 FADVISE_VERITY_BIT    = 0x40; // fsverity-protected (integrity, read-only)
+static constexpr u8 FADVISE_TRUNC_BIT     = 0x80; // transient truncate-in-progress hint
+
+// ────────────────────────────────────────────────────────────────────────────
+// Additional i_flags bits (beyond F2FS_COMPR_FL, already defined below in the
+// compression section) that are genuine on-disk attributes worth capturing.
+// ────────────────────────────────────────────────────────────────────────────
+static constexpr u32 F2FS_PROJINHERIT_FL = 0x20000000; // children inherit i_projid
+static constexpr u32 F2FS_CASEFOLD_FL    = 0x40000000; // case-insensitive directory lookups
+
+// ────────────────────────────────────────────────────────────────────────────
 // File types used in directory entries
 // ────────────────────────────────────────────────────────────────────────────
 static constexpr u8 F2FS_FT_UNKNOWN   = 0;

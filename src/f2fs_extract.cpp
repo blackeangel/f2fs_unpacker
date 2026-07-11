@@ -49,11 +49,6 @@
 
 namespace fs = std::filesystem;
 
-// ────────────────────────────────────────────────────────────────────────────
-// inode flag bits (from include/linux/f2fs_fs.h)
-// ────────────────────────────────────────────────────────────────────────────
-static constexpr u32 F2FS_ENCRYPT_FL = 0x00000800; // directory / file is encrypted
-
 // Maximum recursion depth for directory traversal
 static constexpr int MAX_DEPTH = 512;
 
@@ -474,6 +469,15 @@ bool F2FSExtractor::extractAll(const std::string& outdir)
              (unsigned long long)stale_blocks_read_);
     }
 
+    if (encrypted_dirs_skipped_ > 0) {
+        logf(LogLevel::WARN,
+             "Skipped %u fscrypt-encrypted subtree(s) entirely: no key available "
+             "to decrypt names or content. This is normal for /data or /sdcard "
+             "images; system/vendor/product/odm partitions are never encrypted "
+             "this way.",
+             encrypted_dirs_skipped_);
+    }
+
     return ok;
 }
 
@@ -514,7 +518,9 @@ bool F2FSExtractor::extractEntry(u32 ino, u8 ftype,
     const u16         mode  = inode.i_mode;
 
     // Encrypted inode: create placeholder, don't try to parse data blocks.
-    if (inode.i_flags & F2FS_ENCRYPT_FL) {
+    // See FADVISE_ENCRYPT_BIT comment in f2fs_fs.h for why i_advise (not
+    // i_flags) is the correct field to check here.
+    if (inode.i_advise & FADVISE_ENCRYPT_BIT) {
         logf(LogLevel::WARN, "Encrypted inode %u (%s) — skipping content", ino, outpath.c_str());
         if (ftype == F2FS_FT_DIR || S_ISDIR(mode)) {
             fs::create_directories(outpath);
@@ -632,7 +638,30 @@ bool F2FSExtractor::extractRegularFile(const f2fs_inode& inode, const std::strin
 bool F2FSExtractor::extractCompressedFile(const f2fs_inode& inode,
                                           const std::string& outpath)
 {
-    const u64 file_size   = inode.i_size;
+    const u64 file_size = inode.i_size;
+
+    // Guard against a corrupted/malformed image where F2FS_COMPR_FL is set
+    // but the extra_attr region is too small to actually hold
+    // i_log_cluster_size/i_compress_algorithm/i_compr_blocks (kernel never
+    // does this for a legitimately-written image — F2FS_FITS_IN_INODE always
+    // holds for these fields whenever F2FS_COMPR_FL is set). Without this
+    // check, a garbage i_log_cluster_size byte could make `1u << N` shift by
+    // more than 31 bits, which is undefined behavior in C++.
+    if (!(inode.i_inline & F2FS_EXTRA_ATTR) || inode.i_extra_isize < 36) {
+        logf(LogLevel::ERR,
+             "%s: F2FS_COMPR_FL set but extra_attr region too small "
+             "(i_extra_isize=%u) — image is corrupted or malformed; "
+             "writing zero bytes instead of risking undefined behavior",
+             outpath.c_str(), (u32)inode.i_extra_isize);
+        FILE* zf = ::fopen(outpath.c_str(), "wb");
+        if (!zf) {
+            logf(LogLevel::ERR, "fopen(%s): %s", outpath.c_str(), strerror(errno));
+            return false;
+        }
+        ::fclose(zf);
+        return true;
+    }
+
     const u32 cluster_sz  = 1u << inode.i_log_cluster_size;  // pages per cluster
     const u8  algo        = inode.i_compress_algorithm;
 
@@ -861,9 +890,28 @@ bool F2FSExtractor::extractDir(u32 ino, const std::string& outpath, int depth)
     f2fs_node node;
     if (!readNode(ino, node)) return false;
 
-    fs::create_directories(outpath);
-
     const f2fs_inode& inode = node.i;
+
+    // Encrypted directory: every dentry name in this directory's own data
+    // blocks is ciphertext (fscrypt directory policies apply to the whole
+    // subtree — see FADVISE_ENC_NAME_BIT comment in f2fs_fs.h). We have no
+    // key to decrypt names or content, so there's nothing safe to recover
+    // here. Interpreting raw ciphertext bytes as a path component risks
+    // embedded NUL/'/' bytes or invalid UTF-8/UTF-16, so skip the entire
+    // subtree rather than silently writing garbage-named files. This check
+    // must happen here, BEFORE any dentry is read — by the time a child's
+    // own inode is examined (in extractEntry()) its ciphertext name has
+    // already been used to build a path.
+    if (inode.i_advise & FADVISE_ENCRYPT_BIT) {
+        ++encrypted_dirs_skipped_;
+        logf(LogLevel::WARN,
+             "Encrypted directory (nid=%u, %s): dentry names are ciphertext "
+             "without the fscrypt key — skipping entire subtree",
+             ino, outpath.c_str());
+        return true;   // not an extraction failure — nothing more we can do
+    }
+
+    fs::create_directories(outpath);
 
     // ── Inline dentries ───────────────────────────────────────────────────
     if (inode.i_inline & F2FS_INLINE_DENTS) {
@@ -1081,8 +1129,13 @@ FileMetadata F2FSExtractor::buildMetadata(const std::string& relpath,
 
     // ── F2FS-specific attributes ─────────────────────────────────────────────
 
-    // Transparent compression
-    if (inode.i_flags & F2FS_COMPR_FL) {
+    // Transparent compression. In practice F2FS_COMPR_FL is never set by the
+    // kernel without a full 36-byte extra_attr region (compression requires
+    // i_compr_blocks/i_compress_algorithm/i_log_cluster_size to exist), but
+    // check i_extra_isize explicitly rather than relying on that invariant
+    // holding for every possible (including corrupted) image — same
+    // reasoning as the i_projid fix above.
+    if ((inode.i_flags & F2FS_COMPR_FL) && inode.i_extra_isize >= 36) {
         m.f2fs_compressed   = true;
         m.compress_algo     = inode.i_compress_algorithm;
         m.log_cluster_size  = inode.i_log_cluster_size;
@@ -1090,8 +1143,28 @@ FileMetadata F2FSExtractor::buildMetadata(const std::string& relpath,
         m.compress_released = (inode.i_inline & F2FS_COMPRESS_RELEASED) != 0;
     }
 
-    // Encryption
-    m.f2fs_encrypted    = (inode.i_flags & F2FS_ENCRYPT_FL) != 0;
+    // Encryption — see FADVISE_ENCRYPT_BIT comment in f2fs_fs.h for why this
+    // is i_advise, not i_flags.
+    m.f2fs_encrypted    = (inode.i_advise & FADVISE_ENCRYPT_BIT) != 0;
+
+    // fsverity: integrity-protected, kernel-enforced read-only content
+    m.f2fs_verity       = (inode.i_advise & FADVISE_VERITY_BIT) != 0;
+
+    // Case-insensitive directory lookups (directories only, but the bit
+    // technically lives in the generic i_flags field so no type gate needed)
+    m.f2fs_casefold     = (inode.i_flags & F2FS_CASEFOLD_FL) != 0;
+
+    // Project quota ID. F2FS_EXTRA_ATTR alone is NOT sufficient to guarantee
+    // i_projid is present — an inode can validly have F2FS_EXTRA_ATTR set
+    // with i_extra_isize as small as 4 (covering only i_extra_isize +
+    // i_inline_xattr_size themselves), in which case i_projid physically
+    // doesn't exist and reading it would pull garbage from beyond the
+    // populated region. Matches the kernel's own
+    // F2FS_FITS_IN_INODE(ri, i_extra_isize, i_projid) gate exactly:
+    // i_projid sits at byte offset 4 within the extra_attr union and is
+    // 4 bytes wide, so i_extra_isize must be >= 8 for it to be valid.
+    if ((inode.i_inline & F2FS_EXTRA_ATTR) && inode.i_extra_isize >= 8)
+        m.project_id = inode.i_projid;
 
     // Inline data: both INLINE_DATA and DATA_EXIST must be set for data to
     // actually be present inside the inode. Exclude symlinks: their target

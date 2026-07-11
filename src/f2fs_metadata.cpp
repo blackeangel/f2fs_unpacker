@@ -313,7 +313,11 @@ bool MetadataWriter::writeF2FSSpecial(const std::string& path) const
           "#     log_cluster: cluster = (1 << n) pages = (1 << n) x 4096 bytes\n"
           "#     saved_blocks: number of 4K blocks saved by compression\n"
           "#     released: compressed blocks were freed (COMPRESS_RELEASED flag)\n"
-          "#   encrypt      — file content is encrypted (FBE)\n"
+          "#   encrypt      — file content is fscrypt-encrypted (FBE). Content extracted\n"
+          "#                  as a placeholder only; the real bytes need the fscrypt key.\n"
+          "#   verity       — fsverity-protected: kernel enforces read-only + integrity\n"
+          "#   casefold     — directory does case-insensitive filename lookups\n"
+          "#   projid=<n>   — project quota ID (only shown when non-zero)\n"
           "#   inline_data  — regular file content stored inside the inode block\n"
           "#   inline_dents — directory entries stored inside the inode block\n"
           "#   pinned       — file pinned in place, GC will not move it\n"
@@ -325,6 +329,7 @@ bool MetadataWriter::writeF2FSSpecial(const std::string& path) const
     for (const auto& m : entries_) {
         const bool is_symlink = !m.symlink_target.empty();
         if (is_symlink || m.f2fs_compressed || m.f2fs_encrypted ||
+            m.f2fs_verity || m.f2fs_casefold || m.project_id != 0 ||
             m.f2fs_inline_data || m.f2fs_inline_dents || m.f2fs_pinned)
             sorted.push_back(&m);
     }
@@ -351,6 +356,9 @@ bool MetadataWriter::writeF2FSSpecial(const std::string& path) const
                     m->compress_released ? ",released" : "");
         }
         if (m->f2fs_encrypted)    fputs("\tencrypt",      f);
+        if (m->f2fs_verity)       fputs("\tverity",       f);
+        if (m->f2fs_casefold)     fputs("\tcasefold",     f);
+        if (m->project_id != 0)  fprintf(f, "\tprojid=%u", m->project_id);
         if (m->f2fs_inline_data)  fputs("\tinline_data",  f);
         if (m->f2fs_inline_dents) fputs("\tinline_dents", f);
         if (m->f2fs_pinned)       fputs("\tpinned",       f);
