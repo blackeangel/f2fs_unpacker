@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(f2fs_extract
-    VERSION 1.2.0
+    VERSION 1.3.0
     LANGUAGES C CXX
     DESCRIPTION "F2FS image extractor with transparent decompression"
 )
