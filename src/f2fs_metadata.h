@@ -65,6 +65,15 @@ struct FileMetadata {
     // this is i_advise and not i_flags, contrary to the ext4-style naming)
     bool     f2fs_encrypted      = false;
 
+    // Decoded fscrypt_context xattr (index 9, name "c"), if present and
+    // recognized. Format: "v2,contents=aes-256-xts,names=aes-256-cts,
+    // key_id=<32 hex chars>,nonce=<32 hex chars>". This is metadata
+    // describing HOW the file is encrypted, NOT the encryption key itself
+    // — the key is wrapped by hardware Keymaster/KeyMint and cannot be
+    // recovered from a static image. Empty if f2fs_encrypted is false, or
+    // if the context xattr is missing/unrecognized.
+    std::string encryption_context;
+
     // fsverity: file content is integrity-protected and read-only enforced
     // by the kernel (FADVISE_VERITY_BIT in i_advise)
     bool     f2fs_verity         = false;
@@ -133,3 +142,12 @@ private:
 // parseXAttrBlock
 // ────────────────────────────────────────────────────────────────────────────
 XAttrMap parseXAttrBlock(const uint8_t* data, size_t size);
+
+// ────────────────────────────────────────────────────────────────────────────
+// fscryptContextToString
+//
+// Decode a raw fscrypt_context_v1/v2 xattr value (as found under the
+// "encryption.c" key in an entry's XAttrMap) into a human-readable summary.
+// Returns "" if the input is empty, truncated, or an unrecognized version.
+// ────────────────────────────────────────────────────────────────────────────
+std::string fscryptContextToString(const std::vector<uint8_t>& raw);

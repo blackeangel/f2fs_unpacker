@@ -43,9 +43,79 @@ static const char* xattr_prefix(uint8_t index)
     case XATTR_INDEX_POSIX_ACL_DEFAULT:       return "system.posix_acl_default";
     case XATTR_INDEX_TRUSTED:                 return "trusted.";
     case XATTR_INDEX_SECURITY:                return "security.";
-    case XATTR_INDEX_SYSTEM:                  return "system.";
+    case XATTR_INDEX_ADVISE:                  return "advise.";
+    case XATTR_INDEX_ENCRYPTION:              return "encryption.";
+    case XATTR_INDEX_VERITY:                  return "verity.";
     default:                                  return "";
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// fscryptModeName / fscryptContextToString
+//
+// Decode a raw fscrypt_context_v1/v2 xattr value into a human-readable
+// summary. This is metadata ABOUT the encryption (algorithm, key
+// identifier, per-file nonce) — not the key itself, which is wrapped by
+// hardware Keymaster/KeyMint and isn't present anywhere in a static image.
+// ════════════════════════════════════════════════════════════════════════════
+
+static const char* fscryptModeName(uint8_t mode)
+{
+    switch (mode) {
+    case FSCRYPT_MODE_AES_256_XTS:   return "aes-256-xts";
+    case FSCRYPT_MODE_AES_256_CTS:   return "aes-256-cts";
+    case FSCRYPT_MODE_AES_128_CBC:   return "aes-128-cbc";
+    case FSCRYPT_MODE_AES_128_CTS:   return "aes-128-cts";
+    case FSCRYPT_MODE_SM4_XTS:       return "sm4-xts";
+    case FSCRYPT_MODE_SM4_CTS:       return "sm4-cts";
+    case FSCRYPT_MODE_ADIANTUM:      return "adiantum";
+    case FSCRYPT_MODE_AES_256_HCTR2: return "aes-256-hctr2";
+    default:                         return "unknown";
+    }
+}
+
+static std::string bytesToHex(const uint8_t* data, size_t len)
+{
+    static const char* digits = "0123456789abcdef";
+    std::string out;
+    out.reserve(len * 2);
+    for (size_t i = 0; i < len; ++i) {
+        out += digits[(data[i] >> 4) & 0xF];
+        out += digits[data[i] & 0xF];
+    }
+    return out;
+}
+
+// Returns an empty string if `raw` isn't a recognized/well-sized fscrypt
+// context (e.g. absent, truncated, or a version we don't know about).
+std::string fscryptContextToString(const std::vector<uint8_t>& raw)
+{
+    if (raw.empty()) return "";
+
+    const uint8_t version = raw[0];
+    if (version == FSCRYPT_CONTEXT_V1 && raw.size() >= sizeof(fscrypt_context_v1)) {
+        const auto* ctx = reinterpret_cast<const fscrypt_context_v1*>(raw.data());
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "v1,contents=%s,names=%s,key_descriptor=%s,nonce=%s",
+                 fscryptModeName(ctx->contents_encryption_mode),
+                 fscryptModeName(ctx->filenames_encryption_mode),
+                 bytesToHex(ctx->master_key_descriptor, FSCRYPT_KEY_DESCRIPTOR_SIZE).c_str(),
+                 bytesToHex(ctx->nonce, FSCRYPT_FILE_NONCE_SIZE).c_str());
+        return buf;
+    }
+    if (version == FSCRYPT_CONTEXT_V2 && raw.size() >= sizeof(fscrypt_context_v2)) {
+        const auto* ctx = reinterpret_cast<const fscrypt_context_v2*>(raw.data());
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "v2,contents=%s,names=%s,key_id=%s,nonce=%s",
+                 fscryptModeName(ctx->contents_encryption_mode),
+                 fscryptModeName(ctx->filenames_encryption_mode),
+                 bytesToHex(ctx->master_key_identifier, FSCRYPT_KEY_IDENTIFIER_SIZE).c_str(),
+                 bytesToHex(ctx->nonce, FSCRYPT_FILE_NONCE_SIZE).c_str());
+        return buf;
+    }
+    return "";  // unrecognized version or truncated value
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -312,9 +382,23 @@ bool MetadataWriter::writeF2FSSpecial(const std::string& path) const
           "#   compress:algo=<lzo|lz4|zstd|lzorle>,log_cluster=<n>,saved_blocks=<n>[,released]\n"
           "#     log_cluster: cluster = (1 << n) pages = (1 << n) x 4096 bytes\n"
           "#     saved_blocks: number of 4K blocks saved by compression\n"
-          "#     released: compressed blocks were freed (COMPRESS_RELEASED flag)\n"
-          "#   encrypt      — file content is fscrypt-encrypted (FBE). Content extracted\n"
-          "#                  as a placeholder only; the real bytes need the fscrypt key.\n"
+          "#     released: some blocks were freed via F2FS_IOC_RELEASE_COMPRESS_BLOCKS\n"
+          "#       (Samsung and others do this to save space). Does NOT necessarily\n"
+          "#       mean the data is gone — this extractor recovers it when the actual\n"
+          "#       compressed blocks are still present, and only writes zeros for the\n"
+          "#       specific clusters that were genuinely freed or point outside the\n"
+          "#       image (with a per-cluster [WRN] noting which).\n"
+          "#   encrypt[:v1|v2,contents=<mode>,names=<mode>,key_id=<hex>,nonce=<hex>]\n"
+          "#     File content is fscrypt-encrypted (FBE). Content is extracted as a\n"
+          "#     zero-byte/placeholder only — the actual encryption key is wrapped by\n"
+          "#     hardware Keymaster/KeyMint and cannot be recovered from this image\n"
+          "#     alone (see project README for details). The decoded fields here\n"
+          "#     (algorithm, key_id, nonce) are genuine on-disk metadata, not secret —\n"
+          "#     key_id is what a real device's kernel uses to look up the actual\n"
+          "#     (wrapped) key in its keyring, useful for matching against one if you\n"
+          "#     ever obtain it through legitimate means (e.g. a live keyring dump on\n"
+          "#     your own rooted, unlocked device). Bare \"encrypt\" with no details\n"
+          "#     means the context xattr was missing or in an unrecognized format.\n"
           "#   verity       — fsverity-protected: kernel enforces read-only + integrity\n"
           "#   casefold     — directory does case-insensitive filename lookups\n"
           "#   projid=<n>   — project quota ID (only shown when non-zero)\n"
@@ -355,7 +439,12 @@ bool MetadataWriter::writeF2FSSpecial(const std::string& path) const
                     (unsigned long long)m->compr_blocks,
                     m->compress_released ? ",released" : "");
         }
-        if (m->f2fs_encrypted)    fputs("\tencrypt",      f);
+        if (m->f2fs_encrypted) {
+            if (!m->encryption_context.empty())
+                fprintf(f, "\tencrypt:%s", m->encryption_context.c_str());
+            else
+                fputs("\tencrypt", f);
+        }
         if (m->f2fs_verity)       fputs("\tverity",       f);
         if (m->f2fs_casefold)     fputs("\tcasefold",     f);
         if (m->project_id != 0)  fprintf(f, "\tprojid=%u", m->project_id);

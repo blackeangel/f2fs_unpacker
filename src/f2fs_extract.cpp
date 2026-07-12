@@ -665,38 +665,20 @@ bool F2FSExtractor::extractCompressedFile(const f2fs_inode& inode,
     const u32 cluster_sz  = 1u << inode.i_log_cluster_size;  // pages per cluster
     const u8  algo        = inode.i_compress_algorithm;
 
-    // ── Compress-released files (Samsung et al.) ──────────────────────────────
-    // Some OEM image builders (notably Samsung) compress files and then call
-    // F2FS_IOC_RELEASE_COMPRESS_BLOCKS to free the compressed blocks, shrinking
-    // the final image.  After this operation:
-    //   - F2FS_COMPRESS_RELEASED (i_inline bit 0x80) is set
-    //   - Physical block addresses in i_addr may be NULL_ADDR or stale addresses
-    //     that now point BEYOND the shrunken image's EOF
-    // The kernel returns zeros when reading such a file at runtime (the blocks
-    // are simply gone), so we do the same: write i_size zero bytes and skip all
-    // block reads.
-    if (inode.i_inline & F2FS_COMPRESS_RELEASED) {
-        logf(LogLevel::INFO,
-             "Compressed-released (blocks freed by OEM): writing %llu zero bytes  %s",
-             (unsigned long long)file_size, outpath.c_str());
-        FILE* zf = ::fopen(outpath.c_str(), "wb");
-        if (!zf) {
-            logf(LogLevel::ERR, "fopen(%s): %s", outpath.c_str(), strerror(errno));
-            return false;
-        }
-        const std::vector<u8> zeros(std::min(file_size, (u64)blksize_), 0);
-        for (u64 rem = file_size; rem > 0; ) {
-            const size_t chunk = (size_t)std::min(rem, (u64)zeros.size());
-            if (::fwrite(zeros.data(), 1, chunk, zf) != chunk) {
-                logf(LogLevel::ERR, "fwrite(%s): %s", outpath.c_str(), strerror(errno));
-                ::fclose(zf);
-                return false;
-            }
-            rem -= chunk;
-        }
-        ::fclose(zf);
-        return true;
-    }
+    // NOTE on F2FS_COMPRESS_RELEASED (i_inline bit 0x80): this flag by itself
+    // does NOT mean the file's data is gone. F2FS_IOC_RELEASE_COMPRESS_BLOCKS
+    // (fs/f2fs/file.c release_compress_blocks()) only frees cluster slots
+    // that were reserved-but-never-written (NEW_ADDR) — it never touches a
+    // slot that already holds real compressed data. A released file can
+    // still have fully valid, in-range, decompressible blocks; we handle
+    // that below in the normal cluster-reading loop, which already stops
+    // gathering bytes once it has `clen` of them and never needs to touch
+    // a legitimately-freed NULL_ADDR slot beyond that point. Blocks that
+    // genuinely ARE gone (address beyond the image's total_block_count_,
+    // the Samsung image-shrinking pattern) are still transparently zeroed
+    // by readBlock()'s stale-address check, and a cluster whose FIRST block
+    // is itself missing is zero-filled per-cluster below rather than
+    // failing the whole file.
 
     logf(LogLevel::INFO, "Compressed file: algo=%u cluster_pages=%u size=%llu  %s",
          (u32)algo, cluster_sz, (unsigned long long)file_size, outpath.c_str());
@@ -720,10 +702,31 @@ bool F2FSExtractor::extractCompressedFile(const f2fs_inode& inode,
             // Read the first physical block — contains the compress header.
             const u32 phys1 = fileBlockAddr(inode, bidx + 1);
             if (phys1 == NULL_ADDR || phys1 == NEW_ADDR) {
-                logf(LogLevel::ERR, "Compressed cluster at bidx=%llu: missing first block",
-                     (unsigned long long)bidx);
-                ::fclose(out);
-                return false;
+                // This specific cluster's data was released/never written
+                // (see F2FS_COMPRESS_RELEASED note above) — legitimate
+                // state, not corruption. Zero-fill just this cluster's
+                // worth of output and move on to the next one.
+                const u64 plain_sz = (u64)cluster_sz * blksize_;
+                const u64 chunk    = std::min(file_size - written, plain_sz);
+                logf(LogLevel::WARN,
+                     "%s: cluster at bidx=%llu has no data (released) — "
+                     "writing %llu zero bytes for this cluster",
+                     outpath.c_str(), (unsigned long long)bidx,
+                     (unsigned long long)chunk);
+                std::fill(blkbuf.begin(), blkbuf.end(), u8{0});
+                u64 zwritten = 0;
+                while (zwritten < chunk) {
+                    const size_t take = (size_t)std::min(chunk - zwritten, (u64)blksize_);
+                    if (::fwrite(blkbuf.data(), 1, take, out) != take) {
+                        logf(LogLevel::ERR, "fwrite: %s", strerror(errno));
+                        ::fclose(out);
+                        return false;
+                    }
+                    zwritten += take;
+                }
+                written += chunk;
+                bidx    += cluster_sz;
+                continue;
             }
             if (!readBlock(phys1, blkbuf.data())) { ::fclose(out); return false; }
 
@@ -1146,6 +1149,17 @@ FileMetadata F2FSExtractor::buildMetadata(const std::string& relpath,
     // Encryption — see FADVISE_ENCRYPT_BIT comment in f2fs_fs.h for why this
     // is i_advise, not i_flags.
     m.f2fs_encrypted    = (inode.i_advise & FADVISE_ENCRYPT_BIT) != 0;
+
+    // Decode the fscrypt_context xattr (index 9, name "c") when present.
+    // This is metadata ABOUT the encryption (algorithm, key identifier,
+    // per-file nonce) — genuinely stored on disk and readable without any
+    // key. It does NOT include the encryption key itself, which is wrapped
+    // by hardware Keymaster/KeyMint and unrecoverable from a static image.
+    if (m.f2fs_encrypted) {
+        auto it_ctx = xm.find("encryption.c");
+        if (it_ctx != xm.end())
+            m.encryption_context = fscryptContextToString(it_ctx->second);
+    }
 
     // fsverity: integrity-protected, kernel-enforced read-only content
     m.f2fs_verity       = (inode.i_advise & FADVISE_VERITY_BIT) != 0;

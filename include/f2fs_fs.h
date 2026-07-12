@@ -430,19 +430,77 @@ static constexpr u32 F2FS_COMPRESS_HEADER_SIZE = 24; // sizeof(f2fs_compress_hea
 
 static constexpr u32 F2FS_XATTR_MAGIC = 0xF2F52011;
 
-// Name-prefix index → string prefix:
+// Name-prefix index → string prefix (verified against kernel fs/f2fs/xattr.h
+// F2FS_XATTR_INDEX_* and xattr.c's f2fs_xattr_handler_map[]):
 //   1  "user."
 //   2  "system.posix_acl_access"
 //   3  "system.posix_acl_default"
 //   4  "trusted."
 //   6  "security."
-//   7  "system."
-static constexpr u8 XATTR_INDEX_USER      = 1;
+//   7  synthetic i_advise alias (F2FS_XATTR_INDEX_ADVISE) — not a real stored
+//      xattr in practice, kept as "advise" for entries that do appear this way
+//   9  fscrypt context (F2FS_XATTR_INDEX_ENCRYPTION), name "c" — hidden from
+//      normal getfattr/setxattr, written directly by the kernel's fscrypt code
+//  11  fsverity descriptor (F2FS_XATTR_INDEX_VERITY), name "v" — same story
+static constexpr u8 XATTR_INDEX_USER              = 1;
 static constexpr u8 XATTR_INDEX_POSIX_ACL_ACCESS  = 2;
 static constexpr u8 XATTR_INDEX_POSIX_ACL_DEFAULT = 3;
-static constexpr u8 XATTR_INDEX_TRUSTED   = 4;
-static constexpr u8 XATTR_INDEX_SECURITY  = 6;
-static constexpr u8 XATTR_INDEX_SYSTEM    = 7;
+static constexpr u8 XATTR_INDEX_TRUSTED           = 4;
+static constexpr u8 XATTR_INDEX_SECURITY          = 6;
+static constexpr u8 XATTR_INDEX_ADVISE            = 7;  // was mislabeled "system." before
+static constexpr u8 XATTR_INDEX_ENCRYPTION        = 9;
+static constexpr u8 XATTR_INDEX_VERITY            = 11;
+
+static constexpr const char* F2FS_XATTR_NAME_ENCRYPTION_CONTEXT = "c";
+static constexpr const char* F2FS_XATTR_NAME_VERITY             = "v";
+
+// ────────────────────────────────────────────────────────────────────────────
+// fscrypt on-disk context — byte layout verified against the kernel's own
+// compile-time assertions in fs/crypto/fscrypt_private.h
+// (BUILD_BUG_ON(sizeof(ctx->v1) != 28), BUILD_BUG_ON(sizeof(ctx->v2) != 40)).
+// This is a genuinely stored xattr value (index 9, name "c"), not something
+// we need a live kernel/TEE to read — it's just metadata describing HOW a
+// file is encrypted (algorithm, key identifier, per-file nonce), not the key
+// itself. The actual key material is wrapped by hardware Keymaster/KeyMint
+// and is not recoverable from a static image (see FADVISE_ENCRYPT_BIT comment
+// above for the full explanation).
+// ────────────────────────────────────────────────────────────────────────────
+static constexpr u8 FSCRYPT_CONTEXT_V1 = 1;
+static constexpr u8 FSCRYPT_CONTEXT_V2 = 2;
+
+static constexpr u8 FSCRYPT_KEY_DESCRIPTOR_SIZE = 8;   // v1 only
+static constexpr u8 FSCRYPT_KEY_IDENTIFIER_SIZE = 16;  // v2 only
+static constexpr u8 FSCRYPT_FILE_NONCE_SIZE     = 16;  // both versions
+
+struct fscrypt_context_v1 {
+    u8 version;                                        // = FSCRYPT_CONTEXT_V1 (1)
+    u8 contents_encryption_mode;
+    u8 filenames_encryption_mode;
+    u8 flags;
+    u8 master_key_descriptor[FSCRYPT_KEY_DESCRIPTOR_SIZE];
+    u8 nonce[FSCRYPT_FILE_NONCE_SIZE];
+} __attribute__((packed));  // sizeof == 28
+
+struct fscrypt_context_v2 {
+    u8 version;                                        // = FSCRYPT_CONTEXT_V2 (2)
+    u8 contents_encryption_mode;
+    u8 filenames_encryption_mode;
+    u8 flags;
+    u8 log2_data_unit_size;
+    u8 reserved[3];
+    u8 master_key_identifier[FSCRYPT_KEY_IDENTIFIER_SIZE];
+    u8 nonce[FSCRYPT_FILE_NONCE_SIZE];
+} __attribute__((packed));  // sizeof == 40
+
+// fscrypt encryption mode numbers (include/uapi/linux/fscrypt.h)
+static constexpr u8 FSCRYPT_MODE_AES_256_XTS    = 1;
+static constexpr u8 FSCRYPT_MODE_AES_256_CTS    = 4;
+static constexpr u8 FSCRYPT_MODE_AES_128_CBC    = 5;
+static constexpr u8 FSCRYPT_MODE_AES_128_CTS    = 6;
+static constexpr u8 FSCRYPT_MODE_SM4_XTS        = 7;
+static constexpr u8 FSCRYPT_MODE_SM4_CTS        = 8;
+static constexpr u8 FSCRYPT_MODE_ADIANTUM       = 9;
+static constexpr u8 FSCRYPT_MODE_AES_256_HCTR2  = 10;
 
 // Header at the start of every xattr block (inline or external)
 struct f2fs_xattr_header {
