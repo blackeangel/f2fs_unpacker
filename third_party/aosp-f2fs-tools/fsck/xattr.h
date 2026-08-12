@@ -24,7 +24,12 @@
 struct f2fs_xattr_header {
 	__le32 h_magic;		/* magic number for identification */
 	__le32 h_refcount;	/* reference count */
-	__u32 h_sloadd[4];	/* zero right now */
+	/* f2fs_extract project fix: removed erroneous h_sloadd[4] field
+	 * (16 bytes) -- the real Linux kernel's on-disk f2fs_xattr_header
+	 * (fs/f2fs/xattr.h) is exactly 8 bytes (h_magic + h_refcount only).
+	 * The extra field here made every xattr written by this vendored
+	 * tool land 16 bytes past where the real kernel (and any spec-
+	 * compliant reader) would look for it. */
 };
 
 struct f2fs_xattr_entry {
