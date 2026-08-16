@@ -523,6 +523,15 @@ static void init_inode_block(struct f2fs_sb_info *sbi,
 	if (c.feature & cpu_to_le32(F2FS_FEATURE_EXTRA_ATTR)) {
 		node_blk->i.i_inline |= F2FS_EXTRA_ATTR;
 		node_blk->i.i_extra_isize = cpu_to_le16(calc_extra_isize());
+		/* f2fs_extract project fix: reserve real inline xattr space.
+		 * get_inline_xattr_addrs() reads i_inline_xattr_size directly
+		 * from the inode when F2FS_FEATURE_FLEXIBLE_INLINE_XATTR is
+		 * active (true for any extra_attr-enabled image), but this
+		 * field was never initialized here, leaving every new inode
+		 * with 0 bytes of inline xattr space -- silently breaking
+		 * f2fs_setxattr() for both SELinux labels and capabilities. */
+		node_blk->i.i_inline_xattr_size =
+			cpu_to_le16(DEFAULT_INLINE_XATTR_ADDRS);
 	}
 
 	set_file_temperature(sbi, node_blk, de->name);
