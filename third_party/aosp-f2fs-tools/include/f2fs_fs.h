@@ -550,6 +550,10 @@ struct f2fs_configuration {
 	char *mount_point;
 	char *target_out_dir;
 	char *fs_config_file;
+	/* f2fs_extract project addition: path to f2fs_special.txt, used to
+	 * recover symlink targets the extractor recorded but couldn't
+	 * physically create on FUSE/exFAT filesystems. */
+	char *f2fs_special_file;
 #ifdef HAVE_LIBSELINUX
 	struct selinux_opt seopt_file[8];
 	int nr_opt;
