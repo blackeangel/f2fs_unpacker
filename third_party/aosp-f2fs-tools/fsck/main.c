@@ -132,6 +132,8 @@ void sload_usage()
 	MSG(0, "\nUsage: sload.f2fs [options] device\n");
 	MSG(0, "[options]:\n");
 	MSG(0, "  -C fs_config\n");
+	MSG(0, "  -X f2fs_special.txt [recovers symlink targets f2fs_extract\n");
+	MSG(0, "     recorded but couldn't create on FUSE/exFAT during extraction]\n");
 	MSG(0, "  -f source directory [path of the source directory]\n");
 	MSG(0, "  -p product out directory\n");
 	MSG(0, "  -s file_contexts\n");
@@ -210,7 +212,13 @@ static void add_default_options(void)
 void f2fs_parse_options(int argc, char *argv[])
 {
 	int option = 0;
-	char *prog = basename(argv[0]);
+	/* f2fs_extract project note: this vendored+patched build is only
+	 * ever used for its sload functionality (see third_party/README),
+	 * so we force sload dispatch here instead of relying on argv[0]
+	 * matching "sload.f2fs" exactly (which would require either
+	 * renaming/symlinking our built binary or patching this dispatch
+	 * anyway -- hardcoding is simplest and most robust). */
+	char *prog = (char *)"sload.f2fs";
 	int err = NOERROR;
 #ifdef WITH_ANDROID
 	int i;
@@ -575,7 +583,7 @@ void f2fs_parse_options(int argc, char *argv[])
 #endif
 	} else if (!strcmp("sload.f2fs", prog)) {
 #ifdef WITH_SLOAD
-		const char *option_string = "cL:a:i:x:m:rC:d:f:p:s:St:T:VP";
+		const char *option_string = "cL:a:i:x:m:rC:d:f:p:s:St:T:VPX:";
 #ifdef HAVE_LIBSELINUX
 		int max_nr_opt = (int)sizeof(c.seopt_file) /
 			sizeof(c.seopt_file[0]);
@@ -663,6 +671,9 @@ void f2fs_parse_options(int argc, char *argv[])
 				break;
 			case 'C':
 				c.fs_config_file = absolute_path(optarg);
+				break;
+			case 'X':
+				c.f2fs_special_file = absolute_path(optarg);
 				break;
 			case 'd':
 				if (!is_digits(optarg)) {
