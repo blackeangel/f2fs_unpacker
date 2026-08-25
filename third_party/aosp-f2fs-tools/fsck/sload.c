@@ -28,6 +28,21 @@ typedef void (*fs_config_f)(const char *path, int dir,
 			    unsigned *uid, unsigned *gid,
 			    unsigned *mode, uint64_t *capabilities);
 
+/* f2fs_pack_fsconfig.c — our own fs_config.txt reader / capabilities writer
+ * / symlink-target recovery, see that file's header comment for why these
+ * replace AOSP's canned_fs_config() and why capabilities/symlinks need
+ * extra handling beyond what this vendored sload.c does on its own. */
+int f2fs_pack_load_fs_config(const char *filename);
+void f2fs_pack_fs_config(const char *path, int dir, const char *target_out_path,
+			 unsigned *uid, unsigned *gid, unsigned *mode,
+			 uint64_t *capabilities);
+int f2fs_pack_set_capabilities(struct f2fs_sb_info *sbi, unsigned int ino,
+			       uint64_t capabilities);
+int f2fs_pack_load_symlinks(const char *filename);
+int f2fs_pack_find_missing_symlinks(const char *dir_path,
+			       char **existing_names, int existing_count,
+			       char ***out_names, char ***out_targets);
+
 #ifndef _WIN32
 static fs_config_f fs_config_func = NULL;
 
