@@ -74,6 +74,19 @@ static int f2fs_make_directory(struct f2fs_sb_info *sbi,
 
 		if (ret)
 			break;
+
+		/* f2fs_extract project addition: AOSP's own sload never
+		 * writes de->capabilities as a security.capability xattr
+		 * anywhere (see f2fs_pack_fsconfig.c's
+		 * f2fs_pack_set_capabilities() comment for the full
+		 * explanation) — do it here now that de[i].ino is valid. */
+		if (de[i].capabilities != 0) {
+			int cap_ret = f2fs_pack_set_capabilities(sbi,
+					de[i].ino, de[i].capabilities);
+			if (cap_ret)
+				ERR_MSG("Failed to set capabilities for %s\n",
+						de[i].path);
+		}
 	}
 
 	return ret;
