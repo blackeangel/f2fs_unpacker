@@ -352,21 +352,39 @@ static int configure_files(void)
 #endif
 skip:
 #endif
-#ifdef HAVE_SELINUX_ANDROID_H
-	/* Load the FS config */
+	/* f2fs_extract project note: AOSP's own canned_fs_config() path
+	 * (guarded by HAVE_SELINUX_ANDROID_H) needs
+	 * <private/android_filesystem_config.h> / <private/canned_fs_config.h>,
+	 * real AOSP-toolchain-only headers we don't vendor. Our own
+	 * f2fs_pack_fs_config() (f2fs_pack_fsconfig.c) reads the identical
+	 * text format from fs_config.txt and implements the same fs_config_f
+	 * signature, so we use it unconditionally instead. */
 	if (c.fs_config_file) {
-		int ret = load_canned_fs_config(c.fs_config_file);
+		int ret = f2fs_pack_load_fs_config(c.fs_config_file);
 
 		if (ret < 0) {
 			ERR_MSG("Failed to load fs_config \"%s\"",
 						c.fs_config_file);
 			return ret;
 		}
-		fs_config_func = canned_fs_config;
+		fs_config_func = f2fs_pack_fs_config;
 	} else {
-		fs_config_func = fs_config;
+		fs_config_func = NULL;
 	}
-#endif
+
+	/* f2fs_extract project addition: load recorded symlink targets
+	 * (optional -- a normal repack from a Linux/Windows-extracted tree
+	 * with real working symlinks has nothing missing, so this is only
+	 * needed for trees extracted directly onto Android FUSE storage). */
+	if (c.f2fs_special_file) {
+		int ret = f2fs_pack_load_symlinks(c.f2fs_special_file);
+
+		if (ret < 0) {
+			ERR_MSG("Failed to load f2fs_special \"%s\"",
+						c.f2fs_special_file);
+			return ret;
+		}
+	}
 	return 0;
 }
 
