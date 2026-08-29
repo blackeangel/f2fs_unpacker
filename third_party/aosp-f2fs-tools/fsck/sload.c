@@ -241,7 +241,24 @@ static int build_directory(struct f2fs_sb_info *sbi, const char *full_path,
 		return -ENOENT;
 	}
 
-	dentries = calloc(entries, sizeof(struct dentry));
+	/* f2fs_extract project addition: find symlinks f2fs_special.txt
+	 * recorded for this directory that scandir() above didn't find on
+	 * disk (the target filesystem couldn't hold them at extraction
+	 * time — see f2fs_pack_find_missing_symlinks()'s comment). Look
+	 * these up BEFORE allocating dentries so we can size the array once. */
+	char **missing_names = NULL, **missing_targets = NULL;
+	int missing_count = 0;
+	{
+		char **scan_names = (char **)calloc((size_t)entries + 1, sizeof(char *));
+		ASSERT(scan_names);
+		for (i = 0; i < entries; i++)
+			scan_names[i] = namelist[i]->d_name;
+		missing_count = f2fs_pack_find_missing_symlinks(dir_path,
+				scan_names, entries, &missing_names, &missing_targets);
+		free(scan_names);
+	}
+
+	dentries = calloc((size_t)entries + (size_t)missing_count, sizeof(struct dentry));
 	ASSERT(dentries);
 
 	for (i = 0; i < entries; i++) {
@@ -266,6 +283,59 @@ static int build_directory(struct f2fs_sb_info *sbi, const char *full_path,
 	}
 
 	free(namelist);
+
+	/* f2fs_extract project addition: append the synthesized missing
+	 * symlinks. Mirrors what set_inode_metadata()/set_perms_and_caps()
+	 * would have done for a real entry, but sourced from our own
+	 * fs_config lookup directly (there's nothing to lstat() here) and
+	 * with de->link set straight from the recorded target instead of
+	 * a readlink() call. */
+	for (int m = 0; m < missing_count; m++) {
+		struct dentry *sd = &dentries[entries + m];
+
+		sd->name = (unsigned char *)strdup(missing_names[m]);
+		sd->len  = strlen(missing_names[m]);
+		ret = asprintf(&sd->path, "%s%s", dir_path, missing_names[m]);
+		ASSERT(ret > 0);
+		/* No real file backs this entry — full_path is only ever used
+		 * for debug logging on the symlink path (see f2fs_create()),
+		 * never opened/stat'd for a symlink's content. */
+		ret = asprintf(&sd->full_path, "%s/%s (recorded, not on disk)",
+				full_path, missing_names[m]);
+		ASSERT(ret > 0);
+
+		sd->file_type = F2FS_FT_SYMLINK;
+		sd->link      = strdup(missing_targets[m]);
+		sd->size      = strlen(missing_targets[m]);
+		sd->mtime     = (u32)c.fixed_time;
+		sd->pino      = dir_ino;
+
+		unsigned uid, gid, mode;
+		uint64_t capabilities;
+		if (fs_config_func) {
+			char *mnt_path = NULL;
+			if (asprintf(&mnt_path, "%s%s", c.mount_point, sd->path) > 0) {
+				fs_config_func(mnt_path, 0, c.target_out_dir,
+						&uid, &gid, &mode, &capabilities);
+				free(mnt_path);
+			} else {
+				uid = gid = 0; mode = 0777; capabilities = 0;
+			}
+		} else {
+			uid = gid = 0; mode = 0777; capabilities = 0;
+		}
+		sd->uid  = (u16)uid;
+		sd->gid  = (u16)gid;
+		sd->mode = (u16)((S_IFLNK & S_IFMT) | (mode & 0xFFFF));
+		sd->capabilities = capabilities;
+
+		MSG(1, "Info: synthesized missing symlink %s -> %s "
+			"(recorded in f2fs_special.txt, not present in source tree)\n",
+			sd->path, sd->link);
+	}
+	free(missing_names);
+	free(missing_targets);
+	entries += missing_count;
 
 	ret = f2fs_make_directory(sbi, entries, dentries);
 	if (ret)
