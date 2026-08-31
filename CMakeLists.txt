@@ -293,3 +293,155 @@ if(LZO_FOUND)
 endif()
 
 add_test(NAME compress_roundtrip COMMAND f2fs_compress_test)
+
+# ════════════════════════════════════════════════════════════════════════════
+# f2fs_pack — repacker, built on AOSP's f2fs-tools sload.f2fs
+#
+# Vendored from https://android.googlesource.com/platform/external/f2fs-tools
+# (via github.com/AOSPA/android_external_f2fs-tools mirror) into
+# third_party/aosp-f2fs-tools/. This is AOSP's own fork, NOT the
+# jaegeuk/f2fs-tools kernel-community tree — it has full working -C
+# (fs_config), -s (file_contexts via standard libselinux selabel_open),
+# and -c/-a/-L (LZ4/LZO compression writing) support that the generic
+# upstream tree lacks entirely (verified: zero compression code anywhere
+# in jaegeuk/f2fs-tools).
+#
+# Built WITHOUT -DWITH_ANDROID: that path requires libcutils/libbase
+# (canned_fs_config, real AOSP-toolchain-only headers) which we don't want
+# to vendor. Instead fs_config_func is pointed at our own small parser
+# (see third_party/aosp-f2fs-tools/fsck/f2fs_pack_fsconfig.c) reading the
+# exact same AOSP canned_fs_config text format our own fs_config.txt
+# writer already uses.
+#
+# Currently Linux only. Windows is excluded matching AOSP's own Android.bp
+# ("windows: { enabled: false }" for this codebase — it's fairly
+# POSIX-heavy: scandir, mntent.h, ioctl, readlink). Android NDK is ALSO
+# excluded here despite AOSP building this same code as part of a normal
+# Android.bp host/device target: that build goes through Bionic libc with
+# Android's own full toolchain, which isn't the same as cross-compiling
+# with the NDK the way this project's f2fs_extract does (Bionic has known
+# gaps in less-common POSIX APIs like getmntent()/mntent.h). This hasn't
+# been tested at all yet, so it's scoped out here rather than silently
+# shipping an unverified cross-compile. Both are candidate follow-ups.
+# ════════════════════════════════════════════════════════════════════════════
+
+if(NOT WIN32 AND NOT MINGW AND NOT ANDROID)
+    set(AOSP_F2FS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/aosp-f2fs-tools)
+
+    set(F2FS_PACK_VENDORED_SOURCES
+        ${AOSP_F2FS_DIR}/fsck/dir.c
+        ${AOSP_F2FS_DIR}/fsck/dict.c
+        ${AOSP_F2FS_DIR}/fsck/mkquota.c
+        ${AOSP_F2FS_DIR}/fsck/quotaio.c
+        ${AOSP_F2FS_DIR}/fsck/quotaio_tree.c
+        ${AOSP_F2FS_DIR}/fsck/quotaio_v2.c
+        ${AOSP_F2FS_DIR}/fsck/node.c
+        ${AOSP_F2FS_DIR}/fsck/segment.c
+        ${AOSP_F2FS_DIR}/fsck/xattr.c
+        ${AOSP_F2FS_DIR}/fsck/main.c
+        ${AOSP_F2FS_DIR}/fsck/mount.c
+        ${AOSP_F2FS_DIR}/fsck/dump.c
+        ${AOSP_F2FS_DIR}/fsck/resize.c
+        ${AOSP_F2FS_DIR}/fsck/defrag.c
+        ${AOSP_F2FS_DIR}/fsck/fsck.c
+        ${AOSP_F2FS_DIR}/fsck/sload.c
+        ${AOSP_F2FS_DIR}/fsck/f2fs_pack_fsconfig.c
+        ${AOSP_F2FS_DIR}/fsck/compress.c
+        ${AOSP_F2FS_DIR}/lib/libf2fs.c
+        ${AOSP_F2FS_DIR}/lib/libf2fs_io.c
+        ${AOSP_F2FS_DIR}/lib/libf2fs_zoned.c
+        ${AOSP_F2FS_DIR}/lib/nls_utf8.c
+    )
+
+    add_executable(f2fs_pack ${F2FS_PACK_VENDORED_SOURCES})
+
+    target_include_directories(f2fs_pack PRIVATE
+        ${AOSP_F2FS_DIR}/include
+        ${AOSP_F2FS_DIR}/mkfs
+        ${AOSP_F2FS_DIR}/fsck
+    )
+
+    # Feature-test macros this codebase checks via #ifdef, set to match a
+    # standard modern Linux/glibc environment (verified present on our
+    # CI's ubuntu-latest runners). Deliberately NOT defined:
+    # HAVE_SELINUX_ANDROID_H (needs AOSP-only libcutils), HAVE_SPARSE_SPARSE_H
+    # (needs Android's libsparse; we always write raw non-sparse images),
+    # HAVE_ATTR_XATTR_H / HAVE_SYS_ACL_H (need separate libattr1-dev/
+    # libacl1-dev packages we don't want as new dependencies — the code's
+    # own OR-gated fallbacks to HAVE_LINUX_XATTR_H / HAVE_LINUX_POSIX_ACL_H
+    # cover the same functionality using only kernel-provided headers).
+    target_compile_definitions(f2fs_pack PRIVATE
+        F2FS_MAJOR_VERSION=1
+        F2FS_MINOR_VERSION=15
+        F2FS_TOOLS_VERSION="1.15.0"
+        F2FS_TOOLS_DATE="2022-05-20"
+        HAVE_BYTESWAP_H
+        HAVE_CLOCK_BOOTTIME
+        HAVE_CLOCK_GETTIME
+        HAVE_FALLOCATE
+        HAVE_FALLOC_H
+        HAVE_FCNTL_H
+        HAVE_FSETXATTR
+        HAVE_FSTAT
+        HAVE_FSYNC
+        HAVE_GETMNTENT
+        HAVE_LIBUUID
+        HAVE_LINUX_FIEMAP_H
+        HAVE_LINUX_FS_H
+        HAVE_LINUX_HDREG_H
+        HAVE_LINUX_LIMITS_H
+        HAVE_LINUX_POSIX_ACL_H
+        HAVE_LINUX_TYPES_H
+        HAVE_LINUX_XATTR_H
+        HAVE_LSEEK64
+        HAVE_MEMSET
+        HAVE_MNTENT_H
+        HAVE_POSIX_ACL_H
+        HAVE_SCSI_SG_H
+        HAVE_SETMNTENT
+        HAVE_STDLIB_H
+        HAVE_STRING_H
+        HAVE_SYS_IOCTL_H
+        HAVE_SYS_MOUNT_H
+        HAVE_SYS_STAT_H
+        HAVE_SYS_SYSMACROS_H
+        HAVE_SYS_UTSNAME_H
+        HAVE_SYS_XATTR_H
+        HAVE_UNISTD_H
+        HAVE_UUID_UUID_H
+    )
+
+    target_link_libraries(f2fs_pack PRIVATE uuid)
+
+    target_compile_definitions(f2fs_pack PRIVATE HAVE_LIBSELINUX)
+    find_library(SELINUX_LIBRARY NAMES selinux)
+    find_path(SELINUX_INCLUDE_DIR NAMES selinux/selinux.h)
+    if(SELINUX_LIBRARY AND SELINUX_INCLUDE_DIR)
+        target_include_directories(f2fs_pack PRIVATE ${SELINUX_INCLUDE_DIR})
+        target_link_libraries(f2fs_pack PRIVATE ${SELINUX_LIBRARY})
+        message(STATUS "f2fs_extract: f2fs_pack -s file_contexts support enabled (${SELINUX_LIBRARY})")
+    else()
+        message(WARNING "f2fs_extract: libselinux not found — f2fs_pack -s file_contexts will not work. Install libselinux1-dev (Debian/Ubuntu) or equivalent.")
+    endif()
+
+    # Reuse the SAME vendored LZ4 already fetched above for f2fs_extract
+    # — compress.c uses the identical standard <lz4.h> API.
+    # Only LZ4 for compression writing — AOSP's compress.c calls
+    # lzo1x_1_15_compress(), a symbol only present in the FULL liblzo2
+    # distribution (no official CMake build system), not in miniLZO (the
+    # embed-friendly subset we vendor for the extractor, which only needs
+    # the simpler lzo1x_1_compress/lzo1x_decompress_safe pair). All
+    # real-world Samsung images seen in this project use LZ4 exclusively;
+    # LZO repack support can be added later by vendoring full liblzo2
+    # if ever needed.
+    if(LZ4_FOUND)
+        target_compile_definitions(f2fs_pack PRIVATE HAVE_LIBLZ4)
+        target_link_libraries(f2fs_pack PRIVATE ${LZ4_TARGET})
+    endif()
+
+    target_compile_options(f2fs_pack PRIVATE
+        -Wno-unused-function -Wno-sign-compare -Wno-pointer-arith
+        -Wno-missing-field-initializers -Wno-format)
+else()
+    message(STATUS "f2fs_extract: f2fs_pack skipped (Linux-only for now; see CMakeLists.txt comment above)")
+endif()
